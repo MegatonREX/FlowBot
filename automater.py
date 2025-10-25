@@ -223,10 +223,21 @@ def _type_text(text, speed=1.0):
     pyautogui.typewrite(str(text), interval=0.01 * speed)
 
 def _press_key(key):
+    """Handle special keys and regular keys."""
     try:
-        pyautogui.press(key)
-    except Exception:
-        pyautogui.typewrite(str(key))
+        # Handle special key formats (e.g. "Key.cmd", "Key.enter")
+        if isinstance(key, str) and key.startswith("Key."):
+            special_key = key.split(".")[-1].lower()
+            if special_key == "cmd":
+                special_key = "win"  # Map command/windows key
+            pyautogui.press(special_key)
+        else:
+            pyautogui.press(str(key))
+    except Exception as e:
+        print(f"Error pressing key {key}: {e}")
+        # Fall back to typing the key as text only if it's not a special key
+        if not (isinstance(key, str) and key.startswith("Key.")):
+            pyautogui.typewrite(str(key))
 
 # -------------------
 # Replay logic with post-conditions & retries
@@ -294,18 +305,24 @@ def replay(workflow, speed=1.0, anchor_threshold=0.80, default_retry=1):
             try:
                 if act in ("mouse_click", "click"):
                     if click_point:
-                        # allow step to request multi-clicks via details e.g., {"clicks":1}
-                        clicks = int(details.get("clicks", 1))
-                        interval = float(details.get("click_interval", 0.08))
-                        _click_at_point(click_point[0], click_point[1], speed=speed, clicks=clicks, interval=interval)
-                        print(f"[Automator] CLICK {sid} -> {click_point} (clicks={clicks})")
+                        # Only perform click on button press events (pressed: true), ignore release events
+                        if not details.get("pressed", True) == False:
+                            # allow step to request multi-clicks via details e.g., {"clicks":1}
+                            clicks = int(details.get("clicks", 1))
+                            interval = float(details.get("click_interval", 0.08))
+                            _click_at_point(click_point[0], click_point[1], speed=speed, clicks=clicks, interval=interval)
+                            print(f"[Automator] CLICK {sid} -> {click_point} (clicks={clicks})")
                     else:
                         print(f"[Automator] No click target for {sid}; skipping action")
                 elif act in ("key_down", "type", "type_text"):
                     k = details.get("key") or details.get("text") or s.get("text")
                     if k is not None:
-                        _type_text(k, speed=speed)
-                        print(f"[Automator] TYPE {sid} -> {k!r}")
+                        if isinstance(k, str) and k.startswith("Key."):
+                            _press_key(k)  # Handle special keys
+                            print(f"[Automator] PRESS {sid} -> {k!r}")
+                        else:
+                            _type_text(k, speed=speed)
+                            print(f"[Automator] TYPE {sid} -> {k!r}")
                     else:
                         print(f"[Automator] No text/key for {sid}; skipping")
                 elif act in ("press", "key_press"):
