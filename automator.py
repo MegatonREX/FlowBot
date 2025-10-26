@@ -40,12 +40,15 @@ os.makedirs(ANCHORS_DIR, exist_ok=True)
 # -------------------
 # Utilities
 # -------------------
-def compute_phash(path):
+# Improve hash error reporting
+def compute_phash(path, debug=False):
     """Compute perceptual hash (phash) for an image file."""
     try:
         h = imagehash.phash(Image.open(path))
         return str(h)
-    except Exception:
+    except Exception as e:
+        if debug:
+            print(f"Warning: Failed to compute hash for {path}: {e}")
         return None
 
 def screenshot_to_cv2():
@@ -72,21 +75,30 @@ def save_anchor(screenshot_path, x, y, w=120, h=60, out_path=None):
     cv2.imwrite(out_path, crop)
     return out_path
 
+# Convert to grayscale for more robust matching
 def find_anchor_on_screen(template_path, threshold=0.80):
     """
     Try to find the template (anchor) on the current screen using template matching.
     Returns center (x,y) of match if found else None.
     """
     if not os.path.exists(template_path):
+        print(f"Warning: Template not found: {template_path}")
         return None
     tpl = cv2.imread(template_path)
     if tpl is None:
+        print(f"Warning: Failed to load template: {template_path}")
         return None
-    screen = screenshot_to_cv2()
+        
+    # Convert both to grayscale for more robust matching
+    tpl = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+    screen = cv2.cvtColor(screenshot_to_cv2(), cv2.COLOR_BGR2GRAY)
+    
     try:
         res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Template matching failed: {e}")
         return None
+        
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
     if max_val >= threshold:
         top_left = max_loc
@@ -211,33 +223,107 @@ def dry_run(workflow):
 # -------------------
 # Low-level actions
 # -------------------
-def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
-    """Move and click. clicks=1 for single click, >1 for multi-clicks."""
-    pyautogui.moveTo(x, y, duration=max(0.05, 0.15 * speed))
-    if clicks == 1:
-        pyautogui.click()
-    else:
-        pyautogui.click(clicks=clicks, interval=interval)
-
-def _type_text(text, speed=1.0):
-    pyautogui.typewrite(str(text), interval=0.01 * speed)
-
+# Improved key mapping and platform handling
 def _press_key(key):
-    """Handle special keys and regular keys."""
+    """
+    Handle special keys and regular keys with better platform compatibility.
+    Adds extra delay for tab/window operations.
+    """
+    # Map common special key names
+    special_key_map = {
+        "Key.enter": "enter",
+        "Key.ctrl": "ctrl",
+        "Key.shift": "shift", 
+        "Key.alt": "alt",
+        "Key.tab": "tab",
+        "Key.space": "space",
+        "Key.esc": "esc",
+        "Key.delete": "delete",
+        "Key.backspace": "backspace",
+        "Key.up": "up",
+        "Key.down": "down",
+        "Key.left": "left",
+        "Key.right": "right",
+        "Key.cmd": "win" if os.name == "nt" else "command",
+        "Key.meta": "win" if os.name == "nt" else "command"
+    }
+
     try:
-        # Handle special key formats (e.g. "Key.cmd", "Key.enter")
-        if isinstance(key, str) and key.startswith("Key."):
-            special_key = key.split(".")[-1].lower()
-            if special_key == "cmd":
-                special_key = "win"  # Map command/windows key
-            pyautogui.press(special_key)
+        if isinstance(key, str):
+            if key.startswith("Key."):
+                mapped = special_key_map.get(key)
+                if mapped:
+                    pyautogui.press(mapped)
+                    # Add extra delay for navigation keys
+                    if mapped in ('tab', 'enter'):
+                        time.sleep(2.0)  # 2 second delay for tab/enter operations
+                    elif mapped in ('win', 'alt'):
+                        time.sleep(1.0)  # 1 second for window operations
+                    else:
+                        time.sleep(0.3)  # Default delay for other special keys
+                else:
+                    print(f"Warning: Unmapped special key: {key}")
+            else:
+                pyautogui.press(key)
+                time.sleep(0.2)
         else:
             pyautogui.press(str(key))
+            time.sleep(0.2)
     except Exception as e:
-        print(f"Error pressing key {key}: {e}")
-        # Fall back to typing the key as text only if it's not a special key
-        if not (isinstance(key, str) and key.startswith("Key.")):
-            pyautogui.typewrite(str(key))
+        print(f"Warning: Key press failed for {key}: {e}")
+
+def _type_text(text, speed=1.0):
+    """Type text with consistent speed and delay between chunks."""
+    # Split long text into chunks to prevent missed keystrokes
+    chunk_size = 20
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    
+    for chunk in chunks:
+        # Type chunk with controlled interval
+        pyautogui.typewrite(str(chunk), interval=max(0.01, 0.02 / speed))
+        # Small pause between chunks
+        time.sleep(max(0.1, 0.2 / speed))
+
+def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
+    """Move and click with smarter delay based on context."""
+    try:
+        screen_width, screen_height = pyautogui.size()
+        x = max(0, min(int(x), screen_width - 1))
+        y = max(0, min(int(y), screen_height - 1))
+        
+        pyautogui.moveTo(x, y, duration=max(0.05, 0.15 * speed))
+        
+        # Take pre-click screenshot for change detection
+        pre_click = screenshot_to_cv2()
+        
+        if clicks == 1:
+            pyautogui.click()
+        else:
+            pyautogui.click(clicks=clicks, interval=interval)
+
+        # Adaptive delay: start with base delay
+        base_delay = max(1.0, 1.5 / speed)  # Minimum 1 second delay
+        time.sleep(base_delay)
+        
+        # Additional delay with change detection
+        max_wait = 5  # Maximum 5 seconds
+        start = time.time()
+        while time.time() - start < max_wait:
+            current = screenshot_to_cv2()
+            # Convert to grayscale for comparison
+            pre_gray = cv2.cvtColor(pre_click, cv2.COLOR_BGR2GRAY)
+            curr_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+            # Calculate difference
+            diff = cv2.absdiff(pre_gray, curr_gray)
+            if cv2.mean(diff)[0] < 2.0:  # Very little change
+                time.sleep(0.5)  # Wait more if screen hasn't changed
+                continue
+            else:
+                time.sleep(0.5)  # Additional small delay after change detected
+                break
+            
+    except Exception as e:
+        print(f"Warning: Click failed at ({x}, {y}): {e}")
 
 # -------------------
 # Replay logic with post-conditions & retries
