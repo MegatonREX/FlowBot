@@ -35,26 +35,37 @@ if os.name == "nt":
     # Guard in case user did not add to PATH
     pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT_CMD
 
-# Whisper lazy load
-WHISPER_AVAILABLE = False
-_whisper_model = None
-def _ensure_whisper(model_name="small"):
-    global WHISPER_AVAILABLE, _whisper_model
-    if WHISPER_AVAILABLE and _whisper_model is not None:
-        return _whisper_model
+# Replace Whisper section with Vosk loading
+VOSK_AVAILABLE = False
+_vosk_recognizer = None
+
+def _ensure_vosk(model_path="models/vosk-model-small-en-us-0.15"):
+    """Initialize Vosk recognizer"""
+    global VOSK_AVAILABLE, _vosk_recognizer
+    if VOSK_AVAILABLE and _vosk_recognizer is not None:
+        return _vosk_recognizer
+    
     try:
-        import whisper
-        _whisper_model = whisper.load_model(model_name)
-        WHISPER_AVAILABLE = True
-        return _whisper_model
-    except Exception:
-        WHISPER_AVAILABLE = False
-        _whisper_model = None
+        from vosk import Model, KaldiRecognizer
+        import wave
+        
+        if not os.path.exists(model_path):
+            print(f"[Vosk] Model not found at {model_path}")
+            print("[Vosk] Please download model from https://alphacephei.com/vosk/models")
+            print("[Vosk] and extract to", model_path)
+            return None
+
+        model = Model(model_path)
+        _vosk_recognizer = lambda audio_file: KaldiRecognizer(model, 16000)
+        VOSK_AVAILABLE = True
+        return _vosk_recognizer
+    except Exception as e:
+        print(f"Failed to load Vosk: {e}")
+        VOSK_AVAILABLE = False
+        _vosk_recognizer = None
         return None
 
-# -------------------
-# Utility functions
-# -------------------
+
 def _safe_imread(path):
     try:
         img = cv2.imread(path)
@@ -85,21 +96,68 @@ def ocr_image(path, ocr_cache=None):
     ocr_cache[path] = text
     return text
 
-def transcribe_audio(path, use_whisper=False, model_name="small"):
+def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15", session_dir=None):
     """
-    Transcribe audio at path. If use_whisper==True and whisper is installed,
-    uses Whisper model (loaded once). Otherwise returns placeholder text.
+    Transcribe audio using Vosk.
+    Shows detailed transcription with confidence scores.
+    Returns placeholder if Vosk unavailable or disabled.
+    If session_dir is provided, saves transcription to a text file.
     """
-    if not use_whisper:
+    if not use_vosk:
         return f"[audio:{os.path.basename(path)}]"
 
-    model = _ensure_whisper(model_name=model_name)
-    if model is None:
+    rec_factory = _ensure_vosk(model_path)
+    if rec_factory is None:
         return f"[audio:{os.path.basename(path)}]"
+    
+    # Create transcripts directory if saving
+    transcripts_dir = None
+    if session_dir:
+        transcripts_dir = os.path.join(session_dir, "transcripts")
+        os.makedirs(transcripts_dir, exist_ok=True)
+    
     try:
-        res = model.transcribe(path)
-        return res.get("text", "")
-    except Exception:
+        import wave
+        wf = wave.open(path, "rb")
+        rec = rec_factory(wf.getframerate())
+        
+        transcription = []
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                if result.get("text"):
+                    confidence = result.get("confidence", 0)
+                    trans_text = f"{result['text']} (conf: {confidence:.2f})"
+                    transcription.append(trans_text)
+                    print(f"\033[32m[Audio]\033[0m {trans_text}")  # Green color for audio
+        
+        # Get final result
+        final = json.loads(rec.FinalResult())
+        if final.get("text"):
+            confidence = final.get("confidence", 0)
+            trans_text = f"{final['text']} (conf: {confidence:.2f})"
+            transcription.append(trans_text)
+            print(f"\033[32m[Audio]\033[0m {trans_text}")
+        
+        full_transcript = " | ".join(transcription)
+        if not full_transcript:
+            full_transcript = f"[no speech detected in {os.path.basename(path)}]"
+        
+        # Save transcription if session_dir is provided
+        if transcripts_dir:
+            timestamp = datetime.fromtimestamp(os.path.getctime(path)).strftime('%Y%m%d_%H%M%S')
+            trans_file = os.path.join(transcripts_dir, f"transcript_{timestamp}.txt")
+            with open(trans_file, "w", encoding="utf-8") as f:
+                f.write(full_transcript)
+            print(f"\033[36m[Info]\033[0m Saved transcript to {trans_file}")
+        
+        return full_transcript
+        
+    except Exception as e:
+        print(f"Transcription failed: {e}")
         return f"[audio:{os.path.basename(path)}]"
 
 # -------------------
@@ -160,32 +218,38 @@ def summarize_workflow(steps):
     last = (steps[-1].get("ocr_text","") or "")[:120].replace("\n"," ")
     return f"Workflow of {len(steps)} steps. Starts near: '{first}' and ends near: '{last}'."
 
-def analyze_session(session_dir, out_dir=WORKFLOWS, use_whisper=False, whisper_model="small"):
+def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15"):
     """
     Analyze a single recording session directory and produce workflow JSON.
     Returns the workflow dict.
     """
+    print(f"\033[36m[Info]\033[0m Analyzing session in {session_dir}")
+    
     # load and OCR
     events, ocr_cache = load_session(session_dir)
+    print(f"\033[36m[Info]\033[0m Loaded {len(events)} events")
+    
+    # Process key events in real-time order
+    key_events = [e for e in events if e.get("type") == "key_down"]
+    for e in sorted(key_events, key=lambda x: x.get("ts", 0)):
+        key = e.get("key", "")
+        if key:  # Only print actual keystrokes
+            print(f"\033[33m[Key]\033[0m {key}")
+    
     steps = heuristics_segment(events, ocr_cache)
 
-    # transcribe audio chunks and attach to nearest step
-    for e in events:
-        if e.get("type") == "audio_chunk":
-            audio_path = e.get("file")
-            if audio_path and os.path.exists(audio_path):
-                txt = transcribe_audio(audio_path, use_whisper=use_whisper, model_name=whisper_model)
-                # attach to nearest step within a threshold (seconds)
-                nearest = None
-                min_dt = 1e9
-                for s in steps:
-                    dt = abs((s.get("ts") or 0) - e.get("ts",0))
-                    if dt < min_dt:
-                        min_dt = dt
-                        nearest = s
-                if nearest and min_dt < 5:  # within 5 seconds
-                    nearest.setdefault("transcripts", []).append(txt)
-
+    # transcribe the complete audio recording
+    audio_events = [e for e in events if e.get("type") == "audio_recording"]
+    if audio_events:
+        audio_event = audio_events[0]  # There should be only one complete recording
+        audio_path = audio_event.get("file")
+        if audio_path and os.path.exists(audio_path):
+            print(f"\033[36m[Info]\033[0m Transcribing audio recording ({audio_event.get('duration', 0):.1f} seconds)...")
+            txt = transcribe_audio(audio_path, use_vosk=use_vosk, model_path=model_path, session_dir=session_dir)
+            # Add transcription to all steps as a complete recording
+            for s in steps:
+                s.setdefault("transcripts", []).append(txt)
+    
     summary = summarize_workflow(steps)
     workflow = {
         "session": os.path.basename(session_dir.rstrip(os.sep)),
@@ -206,7 +270,7 @@ def analyze_session(session_dir, out_dir=WORKFLOWS, use_whisper=False, whisper_m
 
     return workflow
 
-def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_whisper=False, whisper_model="small"):
+def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15"):
     """
     Convenience: analyze the most recent session in recordings_dir.
     """
@@ -214,7 +278,7 @@ def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_whisper=Fal
     if not sessions:
         raise FileNotFoundError("No recording sessions found")
     latest = sessions[-1]
-    return analyze_session(os.path.join(recordings_dir, latest), out_dir=out_dir, use_whisper=use_whisper, whisper_model=whisper_model)
+    return analyze_session(os.path.join(recordings_dir, latest), out_dir=out_dir, use_vosk=use_vosk, model_path=model_path)
 
 def detect_repeats(read_dir=RECORDINGS):
     """
@@ -242,7 +306,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Analyze a recording session into a workflow JSON.")
     parser.add_argument("--session", "-s", type=str, default=None, help="Path to session dir (default: latest in recordings/)")
-    parser.add_argument("--whisper", action="store_true", help="Use Whisper transcription if available")
+    parser.add_argument("--vosk", action="store_true", help="Use Vosk transcription if available")
+    parser.add_argument("--model-path", type=str, default="models/vosk-model-small-en-us-0.15", 
+                       help="Path to Vosk model directory")
     args = parser.parse_args()
 
     if args.session:
@@ -255,7 +321,7 @@ if __name__ == "__main__":
         sd = os.path.join(RECORDINGS, sessions[-1])
 
     print("Analyzing", sd)
-    wf = analyze_session(sd, use_whisper=args.whisper)
+    wf = analyze_session(sd, use_vosk=args.vosk, model_path=args.model_path)
     print("Saved workflow for", wf["session"])
     repeats = detect_repeats(RECORDINGS)
     if repeats:

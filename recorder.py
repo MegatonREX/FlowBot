@@ -13,54 +13,135 @@ import sounddevice as sd
 import scipy.io.wavfile as wavfile
 from pynput import mouse, keyboard
 import platform
+import cv2  # for efficient image processing
 
 OUT_DIR = "recordings"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-SCREENSHOT_INTERVAL = 1.0  # seconds
+# Screenshot configuration
+SCREENSHOT_INTERVAL = 1.0  # seconds between checks
+SCREENSHOT_DIFF_THRESHOLD = 10  # minimum average pixel difference to save
+SCREENSHOT_FORCE_INTERVAL = 10  # force save every 10 seconds if no changes
+
 AUDIO_SAMPLE_RATE = 16000
-AUDIO_CHUNK_SECONDS = 5
+
+def compute_frame_difference(frame1, frame2):
+    """
+    Compute average pixel difference between two frames.
+    Returns difference value between 0-255.
+    """
+    if frame1 is None or frame2 is None:
+        return float('inf')  # Guarantee save if either frame is None
+    
+    # Convert to grayscale numpy arrays for efficient comparison
+    gray1 = cv2.cvtColor(np.array(frame1), cv2.COLOR_RGB2GRAY)
+    gray2 = cv2.cvtColor(np.array(frame2), cv2.COLOR_RGB2GRAY)
+    
+    # Compute absolute difference and average
+    diff = np.mean(np.abs(gray2.astype(float) - gray1.astype(float)))
+    return diff
 
 class Recorder:
     def __init__(self, out_dir=OUT_DIR, screenshot_interval=SCREENSHOT_INTERVAL,
-                 audio_sr=AUDIO_SAMPLE_RATE, audio_chunk=AUDIO_CHUNK_SECONDS,
-                 audio_device=None):
+                 audio_sr=AUDIO_SAMPLE_RATE, audio_device=None):
         self.out_dir = out_dir
         self.screenshot_interval = screenshot_interval
         self.audio_sr = audio_sr
-        self.audio_chunk = audio_chunk
         self.audio_device = audio_device
 
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(self.out_dir, self.session_id)
         os.makedirs(self.session_dir, exist_ok=True)
+        
+        # File for continuous audio recording
+        self.audio_file = os.path.join(self.session_dir, "recording.wav")
 
         self.events = []
         self.recording_flag = {'on': False}
         self.audio_buffer = []
 
+        # Screenshot state tracking
+        self.last_screenshot = None
+        self.last_screenshot_time = 0
+        self.screenshot_count = 0
+        self._screenshot_lock = threading.Lock()
+
         self._threads = []
         self._mouse_listener = None
         self._key_listener = None
+        
+    def _capture_event_screenshot(self, ts):
+        """
+        Capture and save a screenshot triggered by an event (click/keypress).
+        Uses a lock to prevent concurrent screenshot saves.
+        Returns the path to the saved screenshot.
+        """
+        with self._screenshot_lock:
+            try:
+                img = ImageGrab.grab()
+                path = os.path.join(self.session_dir, f"screenshot_{self.screenshot_count:05d}.png")
+                img.save(path)
+                self.screenshot_count += 1
+                self.last_screenshot = img
+                self.last_screenshot_time = ts
+                print(f"\033[36m[Screenshot]\033[0m Saved event-triggered capture to {os.path.basename(path)}")
+                return path
+            except Exception as e:
+                print(f"\033[31m[Error]\033[0m Screenshot capture failed: {e}")
+                return None
 
     # --- workers ---
     def _screenshot_worker(self):
-        idx = 0
+        """
+        Smart screenshot worker that:
+        1. Captures screen every SCREENSHOT_INTERVAL
+        2. Saves if significant changes detected (diff > 5)
+        3. Forces save every 5 seconds if no activity
+        """
+        last_force_save = 0
+        last_activity = time.time()
+        
         while self.recording_flag['on']:
             ts = time.time()
             try:
-                img = ImageGrab.grab()
-                path = os.path.join(self.session_dir, f"screenshot_{idx:05d}.png")
-                img.save(path)
-                self.events.append({"ts": ts, "type": "screenshot", "file": path})
-                idx += 1
+                current_frame = ImageGrab.grab()
+                
+                # Compute difference from last saved frame
+                diff = compute_frame_difference(self.last_screenshot, current_frame)
+                
+                # Check conditions for saving
+                significant_change = diff >= SCREENSHOT_DIFF_THRESHOLD
+                time_since_last_save = ts - last_force_save
+                should_force_save = time_since_last_save >= SCREENSHOT_FORCE_INTERVAL
+                
+                # Save if we detect changes or it's time for forced save
+                if significant_change or should_force_save:
+                    with self._screenshot_lock:
+                        path = os.path.join(self.session_dir, f"screenshot_{self.screenshot_count:05d}.png")
+                        current_frame.save(path)
+                        self.events.append({"ts": ts, "type": "screenshot", "file": path})
+                        self.screenshot_count += 1
+                        self.last_screenshot = current_frame
+                        self.last_screenshot_time = ts
+                        last_force_save = ts
+                        
+                        if significant_change:
+                            print(f"\033[36m[Screenshot]\033[0m Saved on change (diff: {diff:.1f})")
+                        else:
+                            print(f"\033[36m[Screenshot]\033[0m Periodic save after {time_since_last_save:.1f}s")
+                else:
+                    print(f"\033[90m[Screenshot]\033[0m No significant changes (diff: {diff:.1f})\033[0m", end="\r")
+                    
             except Exception as e:
-                # log and continue
-                print("Screenshot error:", e)
+                print(f"\033[31m[Error]\033[0m Screenshot error: {e}")
+                
+            # Sleep for the interval
             time.sleep(self.screenshot_interval)
 
     def _audio_worker(self):
         def callback(indata, frames, time_info, status):
+            if status:
+                print(f"Audio callback status: {status}")
             # copy buffer frames to avoid referencing ephemeral memory
             self.audio_buffer.append(indata.copy())
 
@@ -68,27 +149,34 @@ class Recorder:
             stream = sd.InputStream(samplerate=self.audio_sr, channels=1,
                                     callback=callback, device=self.audio_device)
             stream.start()
+            print("Started audio recording...")
         except Exception as e:
             print("Audio input unavailable:", e)
             return  # exit audio thread if audio can't start
 
-        chunk_idx = 0
         try:
+            # Keep the stream running until recording is stopped
             while self.recording_flag['on']:
-                time.sleep(self.audio_chunk)
-                if self.audio_buffer:
-                    chunk = np.concatenate(self.audio_buffer, axis=0)
-                    fn = os.path.join(self.session_dir, f"audio_{chunk_idx:04d}.wav")
-                    try:
-                        wavfile.write(fn, self.audio_sr, (chunk * 32767).astype('int16'))
-                        self.events.append({"ts": time.time(), "type": "audio_chunk", "file": fn})
-                    except Exception as e:
-                        print("Failed to write audio chunk:", e)
-                    self.audio_buffer.clear()
-                    chunk_idx += 1
+                time.sleep(0.1)  # Short sleep to prevent CPU hogging
+            
+            # When recording stops, save the complete buffer
+            if self.audio_buffer:
+                complete_audio = np.concatenate(self.audio_buffer, axis=0)
+                try:
+                    wavfile.write(self.audio_file, self.audio_sr, (complete_audio * 32767).astype('int16'))
+                    self.events.append({
+                        "ts": time.time(),
+                        "type": "audio_recording",
+                        "file": self.audio_file,
+                        "duration": len(complete_audio) / self.audio_sr
+                    })
+                    print(f"Saved audio recording ({len(complete_audio) / self.audio_sr:.1f} seconds)")
+                except Exception as e:
+                    print("Failed to write audio file:", e)
         finally:
             try:
                 stream.stop()
+                print("Stopped audio recording.")
             except Exception:
                 pass
 
@@ -97,18 +185,39 @@ class Recorder:
         self.events.append({"ts": time.time(), "type": "mouse_move", "x": x, "y": y})
 
     def _on_click(self, x, y, button, pressed):
-        self.events.append({"ts": time.time(), "type": "mouse_click", "x": x, "y": y,
-                            "button": str(button), "pressed": pressed})
+        ts = time.time()
+        event = {"ts": ts, "type": "mouse_click", "x": x, "y": y,
+                 "button": str(button), "pressed": pressed}
+        
+        # Take screenshot on mouse click (when pressed, not released)
+        if pressed:
+            screenshot_path = self._capture_event_screenshot(ts)
+            if screenshot_path:
+                event["screenshot"] = screenshot_path
+                print(f"\033[36m[Screenshot]\033[0m Captured on mouse click")
+                
+        self.events.append(event)
 
     def _on_scroll(self, x, y, dx, dy):
         self.events.append({"ts": time.time(), "type": "mouse_scroll", "x": x, "y": y, "dx": dx, "dy": dy})
 
     def _on_press(self, key):
+        ts = time.time()
         try:
             k = key.char
         except Exception:
             k = str(key)
-        self.events.append({"ts": time.time(), "type": "key_down", "key": k})
+            
+        event = {"ts": ts, "type": "key_down", "key": k}
+        
+        # Capture screenshot only on Enter key
+        if k == 'Key.enter':
+            screenshot_path = self._capture_event_screenshot(ts)
+            if screenshot_path:
+                event["screenshot"] = screenshot_path
+                print(f"\033[36m[Screenshot]\033[0m Captured on Enter key press")
+            
+        self.events.append(event)
 
     def _on_release(self, key):
         try:
