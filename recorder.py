@@ -1,4 +1,3 @@
-# recorder.py
 """
 Recorder: captures screenshots, mouse/keyboard events, and audio chunks.
 Saves into recordings/<session_id>/
@@ -12,6 +11,7 @@ import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wavfile
 from pynput import mouse, keyboard
+from pynput.keyboard import Key
 import platform
 import cv2  # for efficient image processing
 
@@ -65,6 +65,15 @@ class Recorder:
         self.last_screenshot_time = 0
         self.screenshot_count = 0
         self._screenshot_lock = threading.Lock()
+
+        # Track currently pressed modifier keys
+        self.pressed_modifiers = set()
+        self.modifier_keys = {
+            Key.ctrl, Key.ctrl_l, Key.ctrl_r,
+            Key.shift, Key.shift_l, Key.shift_r,
+            Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr,
+            Key.cmd, Key.cmd_l, Key.cmd_r  # Mac Command key
+        }
 
         self._threads = []
         self._mouse_listener = None
@@ -201,29 +210,68 @@ class Recorder:
     def _on_scroll(self, x, y, dx, dy):
         self.events.append({"ts": time.time(), "type": "mouse_scroll", "x": x, "y": y, "dx": dx, "dy": dy})
 
+    def _get_key_string(self, key):
+        """Convert key to string representation"""
+        try:
+            return key.char
+        except AttributeError:
+            return str(key)
+
     def _on_press(self, key):
         ts = time.time()
-        try:
-            k = key.char
-        except Exception:
-            k = str(key)
-            
-        event = {"ts": ts, "type": "key_down", "key": k}
+        k = self._get_key_string(key)
         
-        # Capture screenshot only on Enter key
-        if k == 'Key.enter':
+        # Track modifier keys - UPDATE modifiers BEFORE recording the event
+        if key in self.modifier_keys:
+            self.pressed_modifiers.add(key)
+        
+        # Build modifiers string for the event
+        modifiers = []
+        if any(k in self.pressed_modifiers for k in [Key.ctrl, Key.ctrl_l, Key.ctrl_r]):
+            modifiers.append("ctrl")
+        if any(k in self.pressed_modifiers for k in [Key.shift, Key.shift_l, Key.shift_r]):
+            modifiers.append("shift")
+        if any(k in self.pressed_modifiers for k in [Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr]):
+            modifiers.append("alt")
+        if any(k in self.pressed_modifiers for k in [Key.cmd, Key.cmd_l, Key.cmd_r]):
+            modifiers.append("cmd")
+        
+        event = {
+            "ts": ts, 
+            "type": "key_down", 
+            "key": k,
+            "modifiers": modifiers if modifiers else []
+        }
+        
+        # DON'T record standalone modifier key presses - they're just part of shortcuts
+        if key in self.modifier_keys:
+            # Skip recording this event - modifiers are tracked but not logged separately
+            return
+        
+        # Only capture screenshot on Enter key WITHOUT modifiers
+        # This prevents screenshots when doing shortcuts like Cmd+Enter
+        if k == 'Key.enter' and not modifiers:
             screenshot_path = self._capture_event_screenshot(ts)
             if screenshot_path:
                 event["screenshot"] = screenshot_path
                 print(f"\033[36m[Screenshot]\033[0m Captured on Enter key press")
+        
+        # Log keyboard shortcuts for debugging
+        if modifiers and key not in self.modifier_keys:
+            shortcut = "+".join(modifiers) + "+" + k
+            print(f"\033[33m[Shortcut]\033[0m {shortcut}")
             
         self.events.append(event)
 
     def _on_release(self, key):
-        try:
-            k = key.char
-        except Exception:
-            k = str(key)
+        k = self._get_key_string(key)
+        
+        # Remove from pressed modifiers
+        if key in self.modifier_keys:
+            self.pressed_modifiers.discard(key)
+            # Don't record modifier releases either
+            return
+        
         self.events.append({"ts": time.time(), "type": "key_up", "key": k})
 
     # --- public control ---
@@ -285,10 +333,18 @@ class Recorder:
 # Convenience functions for quick usage
 _recorder_singleton = None
 
-def start_recording(audio_device=None):
+def start_recording(audio_device=None, countdown=3):
     global _recorder_singleton
     if _recorder_singleton is None:
         _recorder_singleton = Recorder(audio_device=audio_device)
+
+    if countdown > 0:
+        print(f"Starting recording in {countdown} seconds...")
+        for i in range(countdown, 0, -1):
+            print(f"{i}...", end="\r", flush=True)
+            time.sleep(1)
+        print("Recording started!\n")
+
     _recorder_singleton.start()
     return _recorder_singleton
 

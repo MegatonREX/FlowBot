@@ -1,4 +1,3 @@
-# automator.py
 """
 Automator: dry-run and replay workflows produced by analyzer.py
 - Prefer anchor/template matching when available (more robust than absolute coords)
@@ -40,7 +39,6 @@ os.makedirs(ANCHORS_DIR, exist_ok=True)
 # -------------------
 # Utilities
 # -------------------
-# Improve hash error reporting
 def compute_phash(path, debug=False):
     """Compute perceptual hash (phash) for an image file."""
     try:
@@ -75,7 +73,6 @@ def save_anchor(screenshot_path, x, y, w=120, h=60, out_path=None):
     cv2.imwrite(out_path, crop)
     return out_path
 
-# Convert to grayscale for more robust matching
 def find_anchor_on_screen(template_path, threshold=0.80):
     """
     Try to find the template (anchor) on the current screen using template matching.
@@ -223,7 +220,51 @@ def dry_run(workflow):
 # -------------------
 # Low-level actions
 # -------------------
-# Improved key mapping and platform handling
+def _press_key_combo(modifiers, key):
+    """
+    Press a keyboard shortcut (modifiers + key).
+    modifiers: list like ['ctrl', 'shift']
+    key: the main key like 'r' or 'Key.enter'
+    """
+    # Map modifier names to pyautogui key names
+    modifier_map = {
+        "ctrl": "ctrl",
+        "shift": "shift",
+        "alt": "alt",
+        "cmd": "win" if os.name == "nt" else "command"
+    }
+    
+    # Convert special keys
+    special_key_map = {
+        "Key.enter": "enter",
+        "Key.tab": "tab",
+        "Key.space": "space",
+        "Key.esc": "esc",
+        "Key.delete": "delete",
+        "Key.backspace": "backspace",
+        "Key.up": "up",
+        "Key.down": "down",
+        "Key.left": "left",
+        "Key.right": "right"
+    }
+    
+    # Get the actual key to press
+    if isinstance(key, str) and key.startswith("Key."):
+        actual_key = special_key_map.get(key, key)
+    else:
+        actual_key = key
+    
+    # Build list of keys to press together
+    keys_to_press = [modifier_map.get(m, m) for m in modifiers] + [actual_key]
+    
+    try:
+        # Use hotkey for multiple keys
+        pyautogui.hotkey(*keys_to_press)
+        print(f"[Automator] HOTKEY {'+'.join(keys_to_press)}")
+        time.sleep(1.5)  # Give time for the shortcut to execute
+    except Exception as e:
+        print(f"Warning: Hotkey failed {keys_to_press}: {e}")
+
 def _press_key(key):
     """
     Handle special keys and regular keys with better platform compatibility.
@@ -256,11 +297,11 @@ def _press_key(key):
                     pyautogui.press(mapped)
                     # Add extra delay for navigation keys
                     if mapped in ('tab', 'enter'):
-                        time.sleep(2.0)  # 2 second delay for tab/enter operations
+                        time.sleep(2.0)
                     elif mapped in ('win', 'alt'):
-                        time.sleep(1.0)  # 1 second for window operations
+                        time.sleep(1.0)
                     else:
-                        time.sleep(0.3)  # Default delay for other special keys
+                        time.sleep(0.3)
                 else:
                     print(f"Warning: Unmapped special key: {key}")
             else:
@@ -274,14 +315,11 @@ def _press_key(key):
 
 def _type_text(text, speed=1.0):
     """Type text with consistent speed and delay between chunks."""
-    # Split long text into chunks to prevent missed keystrokes
     chunk_size = 20
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     
     for chunk in chunks:
-        # Type chunk with controlled interval
         pyautogui.typewrite(str(chunk), interval=max(0.01, 0.02 / speed))
-        # Small pause between chunks
         time.sleep(max(0.1, 0.2 / speed))
 
 def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
@@ -293,7 +331,6 @@ def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
         
         pyautogui.moveTo(x, y, duration=max(0.05, 0.15 * speed))
         
-        # Take pre-click screenshot for change detection
         pre_click = screenshot_to_cv2()
         
         if clicks == 1:
@@ -301,25 +338,21 @@ def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
         else:
             pyautogui.click(clicks=clicks, interval=interval)
 
-        # Adaptive delay: start with base delay
-        base_delay = max(1.0, 1.5 / speed)  # Minimum 1 second delay
+        base_delay = max(1.0, 1.5 / speed)
         time.sleep(base_delay)
         
-        # Additional delay with change detection
-        max_wait = 5  # Maximum 5 seconds
+        max_wait = 5
         start = time.time()
         while time.time() - start < max_wait:
             current = screenshot_to_cv2()
-            # Convert to grayscale for comparison
             pre_gray = cv2.cvtColor(pre_click, cv2.COLOR_BGR2GRAY)
             curr_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-            # Calculate difference
             diff = cv2.absdiff(pre_gray, curr_gray)
-            if cv2.mean(diff)[0] < 2.0:  # Very little change
-                time.sleep(0.5)  # Wait more if screen hasn't changed
+            if cv2.mean(diff)[0] < 2.0:
+                time.sleep(0.5)
                 continue
             else:
-                time.sleep(0.5)  # Additional small delay after change detected
+                time.sleep(0.5)
                 break
             
     except Exception as e:
@@ -402,8 +435,14 @@ def replay(workflow, speed=1.0, anchor_threshold=0.80, default_retry=1):
                         print(f"[Automator] No click target for {sid}; skipping action")
                 elif act in ("key_down", "type", "type_text"):
                     k = details.get("key") or details.get("text") or s.get("text")
+                    modifiers = details.get("modifiers", [])
+                    
                     if k is not None:
-                        if isinstance(k, str) and k.startswith("Key."):
+                        # If modifiers are present, use hotkey
+                        if modifiers:
+                            _press_key_combo(modifiers, k)
+                            print(f"[Automator] HOTKEY {sid} -> {'+'.join(modifiers)}+{k!r}")
+                        elif isinstance(k, str) and k.startswith("Key."):
                             _press_key(k)  # Handle special keys
                             print(f"[Automator] PRESS {sid} -> {k!r}")
                         else:
@@ -413,9 +452,14 @@ def replay(workflow, speed=1.0, anchor_threshold=0.80, default_retry=1):
                         print(f"[Automator] No text/key for {sid}; skipping")
                 elif act in ("press", "key_press"):
                     k = details.get("key")
+                    modifiers = details.get("modifiers", [])
                     if k:
-                        _press_key(k)
-                        print(f"[Automator] PRESS {sid} -> {k}")
+                        if modifiers:
+                            _press_key_combo(modifiers, k)
+                            print(f"[Automator] HOTKEY {sid} -> {'+'.join(modifiers)}+{k}")
+                        else:
+                            _press_key(k)
+                            print(f"[Automator] PRESS {sid} -> {k}")
                     else:
                         print(f"[Automator] No key specified for {sid}; skipping")
                 else:

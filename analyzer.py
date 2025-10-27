@@ -130,7 +130,7 @@ def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-e
                 result = json.loads(rec.Result())
                 if result.get("text"):
                     confidence = result.get("confidence", 0)
-                    trans_text = f"{result['text']} (conf: {confidence:.2f})"
+                    trans_text = f"{result['text']}"
                     transcription.append(trans_text)
                     print(f"\033[32m[Audio]\033[0m {trans_text}")  # Green color for audio
         
@@ -138,7 +138,7 @@ def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-e
         final = json.loads(rec.FinalResult())
         if final.get("text"):
             confidence = final.get("confidence", 0)
-            trans_text = f"{final['text']} (conf: {confidence:.2f})"
+            trans_text = f"{final['text']}"
             transcription.append(trans_text)
             print(f"\033[32m[Audio]\033[0m {trans_text}")
         
