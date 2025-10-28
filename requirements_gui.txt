@@ -1,0 +1,23 @@
+# FlowBot GUI Requirements
+# Install with: pip install -r requirements_gui.txt
+
+# Core dependencies (already in requirements.txt)
+pynput
+pillow
+pytesseract
+vosk
+pyautogui
+requests
+
+# GUI Framework
+PyQt6>=6.6.0
+
+# Optional: better audio handling
+sounddevice
+soundfile
+
+# For Ollama integration
+requests
+
+# For better JSON handling
+python-dateutil

@@ -17,7 +17,7 @@ import requests
 from datetime import datetime
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "llama3:8b"
+MODEL_NAME = "mistral:latest"  # Faster alternative: mistral is smaller and quicker than llama3:8b
 
 SYSTEM_PROMPT = """
 You are a workflow summarizer AI.
@@ -68,20 +68,6 @@ Your output must always include the transcript context, even if it’s missing.
 - Keep responses concise, structured, and formatted exactly as shown below.
 
 ---
-
-### Output Example Format:
-
-Summary:
-<your concise narrative of what happened>
-
-Transcript Insight:
-<if available, summarize meaning or write "Transcript: Not available">
-
-Automation:
-<identify automatable patterns or write "No automation needed">
-
-Steps:
-<list of steps that would be automated, if any>
 """
 
 
@@ -188,19 +174,28 @@ DETAILED ACTIONS:
     for action in actions:
         step_num = action.get('step', '')
         desc = action.get('description', '')
+        action_type = action.get('action_type', '')
+        target = action.get('target', '')
+        transcripts = action.get('transcripts', [])
         
         prompt += f"\nStep {step_num}: {desc}"
+        if action_type:
+            prompt += f"\n  Action Type: {action_type}"
+        if target:
+            prompt += f"\n  Target: {target}"
+        if transcripts:
+            # Join all transcripts for this step
+            transcript_text = " | ".join(transcripts)
+            prompt += f"\n  Transcript: {transcript_text}"
     
     prompt += """
 
-Please provide your analysis in exactly this format:
-- Summary: [one sentence describing what the user did]
-- Automation: [either "Can be automated." or "No automation needed."]
+Please provide your analysis following the format specified in the system prompt.
 """
     
     return prompt
 
-def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True):
+def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True, model_name=None):
     """
     Send prompt to Ollama API and get response.
     
@@ -208,9 +203,13 @@ def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True):
         prompt: The user prompt to send
         system_prompt: System instructions for the model
         stream: Whether to stream the response (default: True)
+        model_name: Optional model name to use
     """
+    # Use provided model or default
+    selected_model = model_name if model_name else MODEL_NAME
+    
     payload = {
-        "model": MODEL_NAME,
+        "model": selected_model,
         "prompt": prompt,
         "system": system_prompt,
         "stream": stream,
@@ -224,10 +223,10 @@ def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True):
     }
     
     try:
-        print(f"🤖 Querying Ollama ({MODEL_NAME})...\n")
+        print(f"🤖 Querying Ollama ({selected_model})...\n")
         print("=" * 70)
         
-        response = requests.post(OLLAMA_URL, json=payload, stream=stream, timeout=120)
+        response = requests.post(OLLAMA_URL, json=payload, stream=stream, timeout=200)
         response.raise_for_status()
         
         full_response = ""
@@ -313,6 +312,63 @@ def check_ollama_status():
         print(f"⚠️  Warning: Could not verify Ollama status: {e}")
         return True  # Continue anyway
 
+def analyze_workflow_with_ollama(workflow_file, model_name=None):
+    """
+    Analyze a cleaned workflow file using Ollama LLM.
+    Can be called from other modules.
+    
+    Args:
+        workflow_file: Path to the cleaned workflow JSON or TXT file
+        model_name: Optional model name to use (default: MODEL_NAME from config)
+        
+    Returns:
+        bool: True if analysis was successful, False otherwise
+    """
+    # Use provided model or default
+    selected_model = model_name if model_name else MODEL_NAME
+    
+    # Check file format
+    if not (workflow_file.endswith('.json') or workflow_file.endswith('.txt')):
+        print(f"[Ollama Analyzer] ❌ Error: File must be .json or .txt format")
+        return False
+    
+    if not os.path.exists(workflow_file):
+        print(f"[Ollama Analyzer] ❌ Error: File not found: {workflow_file}")
+        return False
+    
+    # Check Ollama status
+    print("[Ollama Analyzer] 🔍 Checking Ollama status...")
+    if not check_ollama_status():
+        print("[Ollama Analyzer] ⚠️ Ollama not available, skipping LLM analysis")
+        return False
+    
+    print(f"[Ollama Analyzer] ✓ Ollama is ready (using model: {selected_model})\n")
+    
+    try:
+        # Load workflow
+        print(f"[Ollama Analyzer] 📂 Loading workflow: {workflow_file}")
+        workflow = load_workflow(workflow_file)
+        
+        # Format prompt
+        prompt = format_workflow_for_llm(workflow)
+        
+        # Get analysis from Ollama with selected model
+        analysis = query_ollama(prompt, model_name=selected_model)
+        
+        # Save analysis
+        if analysis:
+            save_analysis(workflow_file, analysis)
+            print("\n[Ollama Analyzer] ✨ Analysis complete!")
+            return True
+        else:
+            print("\n[Ollama Analyzer] ⚠️ No analysis generated")
+            return False
+            
+    except Exception as e:
+        print(f"[Ollama Analyzer] ❌ Error during analysis: {e}")
+        return False
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python ollama_workflow_analyzer.py clean_workflows/cleaned_<session>.[json|txt]")
@@ -322,35 +378,8 @@ def main():
         sys.exit(1)
     
     workflow_file = sys.argv[1]
-    
-    # Check file format
-    if not (workflow_file.endswith('.json') or workflow_file.endswith('.txt')):
-        print("❌ Error: File must be .json or .txt format")
-        sys.exit(1)
-    
-    # Check Ollama status
-    print("🔍 Checking Ollama status...")
-    if not check_ollama_status():
-        sys.exit(1)
-    
-    print("✓ Ollama is ready\n")
-    
-    # Load workflow
-    print(f"📂 Loading workflow: {workflow_file}")
-    workflow = load_workflow(workflow_file)
-    
-    # Format prompt
-    prompt = format_workflow_for_llm(workflow)
-    
-    # Get analysis from Ollama
-    analysis = query_ollama(prompt)
-    
-    # Save analysis
-    if analysis:
-        save_analysis(workflow_file, analysis)
-        print("\n✨ Analysis complete!")
-    else:
-        print("\n⚠️  No analysis generated")
+    success = analyze_workflow_with_ollama(workflow_file)
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

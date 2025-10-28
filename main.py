@@ -7,6 +7,7 @@ import subprocess
 from recorder import start_recording, stop_recording
 import analyzer
 from clean_workflow import clean_workflow
+from ollama_workflow_analyzer import analyze_workflow_with_ollama
 
 RECORDINGS_DIR = "recordings"
 WORKFLOW_DIR = "workflows"
@@ -14,15 +15,29 @@ CLEAN_SCRIPT = "clean_workflow.py"
 
 
 def run_clean_workflow(workflow_json_path):
-    """Call clean_workflow.py automatically after analysis."""
+    """Call clean_workflow.py automatically after analysis, then run Ollama analyzer."""
     if not os.path.exists(workflow_json_path):
         print(f"[Cleaner] ❌ Workflow file not found: {workflow_json_path}")
         return
 
     print(f"[Cleaner] 🧹 Cleaning workflow file: {workflow_json_path}")
     try:
-        clean_workflow(workflow_json_path)
+        cleaned = clean_workflow(workflow_json_path)
         print(f"[Cleaner] ✅ Cleaned workflow successfully.")
+        
+        # Extract session_id from cleaned workflow
+        if cleaned and "metadata" in cleaned:
+            session_id = cleaned["metadata"].get("session_id", "unknown")
+            
+            # Construct path to cleaned JSON file
+            cleaned_json_path = os.path.join("clean_workflows", f"cleaned_{session_id}.json")
+            
+            if os.path.exists(cleaned_json_path):
+                print(f"\n[Cleaner] 🤖 Starting Ollama LLM analysis...")
+                analyze_workflow_with_ollama(cleaned_json_path)
+            else:
+                print(f"[Cleaner] ⚠️ Cleaned file not found at: {cleaned_json_path}")
+        
     except Exception as e:
         print(f"[Cleaner] ❌ Error running clean_workflow.py: {e}")
 
