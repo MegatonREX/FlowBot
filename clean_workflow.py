@@ -1,4 +1,3 @@
-# clean_workflow.py
 """
 Clean workflow files produced by analyzer.py into minimal, LLM-friendly form.
 
@@ -54,6 +53,7 @@ def clean_step(step, step_num):
     key = details.get("key", "")
     modifiers = details.get("modifiers", [])
     ocr = simplify_text(step.get("ocr_text", ""))
+    transcripts = step.get("transcripts", [])
     
     # Build readable action description
     action_desc = ""
@@ -146,12 +146,18 @@ def clean_step(step, step_num):
         action_desc = f"Performed: {action}"
         target = ""
     
-    return {
+    result = {
         "step": step_num,
         "action_type": action_type,
         "description": action_desc,
         "target": target
     }
+    
+    # Add transcripts if available
+    if transcripts:
+        result["transcripts"] = transcripts
+    
+    return result
 
 
 def generate_natural_summary(steps):
@@ -268,7 +274,10 @@ def clean_workflow(infile):
         f.write(f"{'='*60}\n\n")
         
         for i, step in enumerate(deduped, 1):
-            f.write(f"Step {i}: {step['description']}\n\n")
+            f.write(f"Step {i}: {step['description']}\n")
+            if "transcripts" in step and step["transcripts"]:
+                f.write(f"  Transcripts: {', '.join(step['transcripts'])}\n")
+            f.write("\n")
 
     print(f"✓ Cleaned JSON workflow: {outpath}")
     print(f"✓ Plain text version: {txt_outpath}")

@@ -4,3 +4,4 @@ workflows
 anchors
 models
 clean_workflows
+__pycache__/

@@ -307,7 +307,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze a recording session into a workflow JSON.")
     parser.add_argument("--session", "-s", type=str, default=None, help="Path to session dir (default: latest in recordings/)")
     parser.add_argument("--vosk", action="store_true", help="Use Vosk transcription if available")
-    parser.add_argument("--model-path", type=str, default="models/vosk-model-small-en-us-0.15", 
+    parser.add_argument("--model-path", type=str, default="model/vosk-model-en-in-0.4", 
                        help="Path to Vosk model directory")
     args = parser.parse_args()
 

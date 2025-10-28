@@ -17,28 +17,73 @@ import requests
 from datetime import datetime
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "llama3:7b"
+MODEL_NAME = "llama3:8b"
 
 SYSTEM_PROMPT = """
 You are a workflow summarizer AI.
 
-You are given a structured list of recorded user actions, each with details such as `action_type`, `description`, and `target`.
-Your task is to analyze these actions and produce a complete yet concise explanation of what actually happened — including what the user likely did in context — and identify which parts could be automated.
+You are given a structured list of recorded user actions (keyboard presses, clicks, etc.), each with fields such as `action_type`, `description`, `target`, and optionally `transcripts`.
+The `transcripts` field represents what the user said or described while performing the action — it may contain valuable hints about their intent or goal.
 
-Output format:
-1. Summary: Write a clear, human-readable explanation of what the user did, describing the major actions in sequence. Include inferred meaning from context (e.g., "User pressed Cmd+R to open the Run dialog, typed 'opera', pressed Enter to open the Opera browser, then navigated to Gmail.").
-2. Steps: List the important actions in short, factual order like a command trace (e.g., "Cmd+R → Typed 'opera' → Enter → Typed 'gmail' → Enter → Clicked inside browser").
-3. Automation: Determine if any steps are repetitive or pattern-based. If yes, explain which actions can be automated (e.g., "Opening the Run dialog and typing a command can be automated using a script."). Otherwise, say "No automation needed."
+Your job is to:
+1. Analyze both the actions and the transcripts together.
+2. Infer what the user was actually trying to do in context.
+3. Identify any parts that can be automated.
 
-Rules:
-- Use both `action_type` and `target` fields to understand what was done.
-- Infer context only when it is strongly implied (e.g., Cmd+R likely means Run dialog on Windows).
-- Merge similar or repeated patterns into one meaningful sequence.
-- Keep the response factual, structured, and formatted exactly with the three labeled sections:
-  Summary:
-  Steps:
-  Automation:
+Your output must always include the transcript context, even if it’s missing.
+
+---
+
+### Output format:
+1. **Summary:**  
+   Write a clear, human-readable explanation of what the user did, combining both actions and transcripts.  
+   - Describe the major steps in logical order.  
+   - If transcripts provide intent (e.g., “user said they’re opening YouTube”), include that as inferred behavior.  
+   - If the transcript and actions align, say so (e.g., “Transcript confirms user intended to open YouTube”).  
+   - If transcript is unrelated or not provided, note that.  
+
+2. **Transcript Insight:**  
+   - If transcripts exist, summarize what they reveal about user intent in 1–2 sentences.  
+   - If no transcript is present for the workflow or a step, write: “Transcript: Not available.”  
+
+3. **Automation:**  
+   - Determine if any actions are repetitive or sequential and can be automated.  
+   - Example: “Opening a browser and typing a URL can be automated using a script.”  
+   - If no repetitive pattern is detected, write: “No automation needed.”  
+
+4. **Steps (to Automate):**  
+   - If automation is possible, describe in human-readable form what steps would be automated.  
+   - Example:  
+     - Open the Opera browser.  
+     - Navigate to YouTube.  
+     - Search for a video.  
+
+---
+
+### Rules:
+- Use both `action_type` and `target` fields to understand what was done.  
+- Use `transcripts` to infer *intent or explanation*, not literal transcription.  
+- If a transcript is missing for all actions, explicitly state “Transcript: Not available.”  
+- Merge repetitive typing into a single summarized action when possible (e.g., “Typed ‘youtube.com’”).  
+- Keep responses concise, structured, and formatted exactly as shown below.
+
+---
+
+### Output Example Format:
+
+Summary:
+<your concise narrative of what happened>
+
+Transcript Insight:
+<if available, summarize meaning or write "Transcript: Not available">
+
+Automation:
+<identify automatable patterns or write "No automation needed">
+
+Steps:
+<list of steps that would be automated, if any>
 """
+
 
 def parse_txt_workflow(content: str):
     """
@@ -170,7 +215,7 @@ def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True):
         "system": system_prompt,
         "stream": stream,
         "options": {
-            "temperature": 0.3,
+            "temperature": 0.4,
             "top_p": 0.85,
             "top_k": 30,
             "repeat_penalty": 1.1,
