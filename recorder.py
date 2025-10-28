@@ -43,11 +43,13 @@ def compute_frame_difference(frame1, frame2):
 
 class Recorder:
     def __init__(self, out_dir=OUT_DIR, screenshot_interval=SCREENSHOT_INTERVAL,
-                 audio_sr=AUDIO_SAMPLE_RATE, audio_device=None):
+                 audio_sr=AUDIO_SAMPLE_RATE, audio_device=None, 
+                 stop_screenshot_buffer=2.5):
         self.out_dir = out_dir
         self.screenshot_interval = screenshot_interval
         self.audio_sr = audio_sr
         self.audio_device = audio_device
+        self.stop_screenshot_buffer = stop_screenshot_buffer  # seconds before stop to avoid capturing app
 
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(self.out_dir, self.session_id)
@@ -58,6 +60,7 @@ class Recorder:
 
         self.events = []
         self.recording_flag = {'on': False}
+        self.screenshot_cutoff_time = None  # Time when screenshots should stop
         self.audio_buffer = []
 
         # Screenshot state tracking
@@ -84,7 +87,13 @@ class Recorder:
         Capture and save a screenshot triggered by an event (click/keypress).
         Uses a lock to prevent concurrent screenshot saves.
         Returns the path to the saved screenshot.
+        Skips if we're in the cutoff period before stopping.
         """
+        # Don't capture if we're in the stop buffer period
+        if self.screenshot_cutoff_time and ts >= self.screenshot_cutoff_time:
+            print(f"\033[90m[Screenshot]\033[0m Skipped (stopping soon)\033[0m")
+            return None
+            
         with self._screenshot_lock:
             try:
                 img = ImageGrab.grab()
@@ -106,12 +115,20 @@ class Recorder:
         1. Captures screen every SCREENSHOT_INTERVAL
         2. Saves if significant changes detected (diff > 5)
         3. Forces save every 5 seconds if no activity
+        4. Stops capturing screenshots when in cutoff period
         """
         last_force_save = 0
         last_activity = time.time()
         
         while self.recording_flag['on']:
             ts = time.time()
+            
+            # Skip screenshots if we're in the cutoff period
+            if self.screenshot_cutoff_time and ts >= self.screenshot_cutoff_time:
+                print(f"\033[90m[Screenshot]\033[0m Stopped capturing (cutoff period)\033[0m")
+                time.sleep(0.1)  # Quick sleep to avoid CPU spinning
+                continue
+                
             try:
                 current_frame = ImageGrab.grab()
                 
@@ -303,6 +320,15 @@ class Recorder:
         if not self.recording_flag['on']:
             print("Recorder not running.")
             return
+        
+        # Set cutoff time to prevent screenshots of the stop action
+        self.screenshot_cutoff_time = time.time()
+        print(f"\033[33m[Recorder]\033[0m Stopping screenshots (buffer: {self.stop_screenshot_buffer}s)")
+        
+        # Wait for the buffer period to pass
+        time.sleep(self.stop_screenshot_buffer)
+        
+        # Now stop recording completely
         self.recording_flag['on'] = False
         # wait a short moment for threads to flush buffers
         time.sleep(0.5)
@@ -315,6 +341,41 @@ class Recorder:
                 self._key_listener.stop()
         except Exception:
             pass
+
+        # Filter out any screenshots/events that occurred after cutoff
+        # BUT keep the audio_recording event which is essential
+        cutoff_time = self.screenshot_cutoff_time
+        filtered_events = []
+        removed_screenshots = []
+        
+        for event in self.events:
+            # Always keep audio_recording events regardless of timestamp
+            if event.get('type') == 'audio_recording':
+                filtered_events.append(event)
+            elif event.get('ts', 0) < cutoff_time:
+                filtered_events.append(event)
+            else:
+                # Delete screenshot files that were captured during stop period
+                if event.get('type') == 'screenshot' and 'file' in event:
+                    try:
+                        if os.path.exists(event['file']):
+                            os.remove(event['file'])
+                            removed_screenshots.append(os.path.basename(event['file']))
+                    except Exception as e:
+                        print(f"\033[31m[Error]\033[0m Failed to delete late screenshot: {e}")
+                elif 'screenshot' in event:
+                    # Also remove screenshot references from other events
+                    try:
+                        if os.path.exists(event['screenshot']):
+                            os.remove(event['screenshot'])
+                            removed_screenshots.append(os.path.basename(event['screenshot']))
+                    except Exception as e:
+                        print(f"\033[31m[Error]\033[0m Failed to delete event screenshot: {e}")
+        
+        self.events = filtered_events
+        
+        if removed_screenshots:
+            print(f"\033[33m[Cleanup]\033[0m Removed {len(removed_screenshots)} screenshot(s) from stop period")
 
         # write events log
         try:
@@ -333,10 +394,11 @@ class Recorder:
 # Convenience functions for quick usage
 _recorder_singleton = None
 
-def start_recording(audio_device=None, countdown=3):
+def start_recording(audio_device=None, countdown=3, stop_screenshot_buffer=2.5):
     global _recorder_singleton
     if _recorder_singleton is None:
-        _recorder_singleton = Recorder(audio_device=audio_device)
+        _recorder_singleton = Recorder(audio_device=audio_device, 
+                                      stop_screenshot_buffer=stop_screenshot_buffer)
 
     if countdown > 0:
         print(f"Starting recording in {countdown} seconds...")

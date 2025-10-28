@@ -17,8 +17,9 @@ pip install -r requirements_gui.txt
 
 #### Ollama (Required for AI analysis)
 - Download from: https://ollama.ai
-- Install and start: `ollama serve`
+- Open PowerShell
 - Pull the model: `ollama pull mistral:latest`
+- Install and start: `ollama serve`
 
 ### Step 3: Verify Installation
 ```bash

@@ -808,9 +808,9 @@ class FlowBotGUI(QMainWindow):
             self.recording_status.setText("🔴 Recording...")
             self.status_bar.showMessage("Recording in progress...")
             
-            # Start recording
+            # Start recording with 2.5s buffer to avoid capturing stop button
             self.log("Initializing recorder...", "INFO")
-            start_recording()
+            start_recording(stop_screenshot_buffer=2.5)
             self.log("Recording started successfully", "SUCCESS")
             
             # Update UI

@@ -35,6 +35,16 @@ if os.name == "nt":
     # Guard in case user did not add to PATH
     pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT_CMD
 
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        import sys
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 # Replace Whisper section with Vosk loading
 VOSK_AVAILABLE = False
 _vosk_recognizer = None
@@ -49,13 +59,16 @@ def _ensure_vosk(model_path="models/vosk-model-small-en-us-0.15"):
         from vosk import Model, KaldiRecognizer
         import wave
         
-        if not os.path.exists(model_path):
-            print(f"[Vosk] Model not found at {model_path}")
+        # Get the correct path for both development and PyInstaller
+        actual_model_path = get_resource_path(model_path)
+        
+        if not os.path.exists(actual_model_path):
+            print(f"[Vosk] Model not found at {actual_model_path}")
             print("[Vosk] Please download model from https://alphacephei.com/vosk/models")
             print("[Vosk] and extract to", model_path)
             return None
 
-        model = Model(model_path)
+        model = Model(actual_model_path)
         _vosk_recognizer = lambda audio_file: KaldiRecognizer(model, 16000)
         VOSK_AVAILABLE = True
         return _vosk_recognizer
@@ -307,7 +320,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze a recording session into a workflow JSON.")
     parser.add_argument("--session", "-s", type=str, default=None, help="Path to session dir (default: latest in recordings/)")
     parser.add_argument("--vosk", action="store_true", help="Use Vosk transcription if available")
-    parser.add_argument("--model-path", type=str, default="model/vosk-model-en-in-0.4", 
+    parser.add_argument("--model-path", type=str, default="models/vosk-model-en-us-0.22-lgraph", 
                        help="Path to Vosk model directory")
     args = parser.parse_args()
 
