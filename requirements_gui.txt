@@ -8,6 +8,8 @@ pytesseract
 vosk
 pyautogui
 requests
+pygetwindow
+easyocr>=1.7.0
 
 # GUI Framework
 PyQt6>=6.6.0

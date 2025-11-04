@@ -84,6 +84,9 @@ class FlowBotGUI(QMainWindow):
         # Log startup
         self.log("FlowBot GUI initialized successfully")
         
+        # Load Ollama models after UI is fully initialized
+        self.refresh_ollama_models()
+        
     def setup_console_redirect(self):
         """Redirect stdout and stderr to capture console output"""
         self.console_stream = ConsoleStream(sys.stdout)
@@ -290,15 +293,31 @@ class FlowBotGUI(QMainWindow):
         ollama_layout = QHBoxLayout()
         ollama_layout.addWidget(QLabel("AI Model:"))
         self.ollama_model_combo = QComboBox()
-        self.ollama_model_combo.addItems(["mistral:latest", "llama3:8b", "llama2:latest", "codellama:latest"])
+        self.ollama_model_combo.setEditable(True)  # Allow custom model names
         self.ollama_model_combo.setToolTip("Select Ollama model for AI analysis")
         ollama_layout.addWidget(self.ollama_model_combo)
+        
+        # Refresh button to reload available models
+        refresh_models_btn = QPushButton("🔄")
+        refresh_models_btn.setMaximumWidth(40)
+        refresh_models_btn.setToolTip("Refresh available Ollama models")
+        refresh_models_btn.clicked.connect(self.refresh_ollama_models)
+        ollama_layout.addWidget(refresh_models_btn)
+        
         recording_layout.addLayout(ollama_layout)
+        
+        # Note: Models will be loaded after UI is fully initialized (see __init__ end)
         
         # Transcription options
         self.vosk_checkbox = QCheckBox("Use Vosk (Offline)")
         self.vosk_checkbox.setChecked(True)
         recording_layout.addWidget(self.vosk_checkbox)
+        
+        # OCR Engine selection
+        self.easyocr_checkbox = QCheckBox("Use EasyOCR (Better accuracy)")
+        self.easyocr_checkbox.setChecked(False)
+        self.easyocr_checkbox.setToolTip("EasyOCR provides better text recognition but slower. Unchecked uses Tesseract (faster).")
+        recording_layout.addWidget(self.easyocr_checkbox)
         
         self.auto_analyze_checkbox = QCheckBox("Auto-analyze")
         self.auto_analyze_checkbox.setChecked(True)
@@ -752,6 +771,122 @@ class FlowBotGUI(QMainWindow):
             self.log(f"Failed to save log: {e}", "ERROR")
             QMessageBox.critical(self, "Save Error", f"Failed to save log:\n{str(e)}")
         
+    def refresh_ollama_models(self):
+        """Fetch available Ollama models and update the combo box"""
+        # Safe logging - check if console is initialized
+        if hasattr(self, 'console_output'):
+            self.log("Fetching available Ollama models...", "INFO")
+        
+        try:
+            import subprocess
+            import json
+            
+            # Run 'ollama list' command to get available models
+            result = subprocess.run(['ollama', 'list', '--json'], 
+                                  capture_output=True, 
+                                  text=True, 
+                                  timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    models_data = json.loads(result.stdout)
+                    available_models = []
+                    
+                    # Extract model names
+                    if isinstance(models_data, dict) and 'models' in models_data:
+                        for model in models_data['models']:
+                            model_name = model.get('name', '')
+                            if model_name:
+                                available_models.append(model_name)
+                    elif isinstance(models_data, list):
+                        for model in models_data:
+                            model_name = model.get('name', '')
+                            if model_name:
+                                available_models.append(model_name)
+                    
+                    if available_models:
+                        # Save current selection
+                        current_model = self.ollama_model_combo.currentText()
+                        
+                        # Update combo box
+                        self.ollama_model_combo.clear()
+                        self.ollama_model_combo.addItems(sorted(available_models))
+                        
+                        # Restore selection if it still exists
+                        index = self.ollama_model_combo.findText(current_model)
+                        if index >= 0:
+                            self.ollama_model_combo.setCurrentIndex(index)
+                        
+                        if hasattr(self, 'console_output'):
+                            self.log(f"Found {len(available_models)} Ollama model(s)", "SUCCESS")
+                    else:
+                        if hasattr(self, 'console_output'):
+                            self.log("No models returned from ollama list", "WARNING")
+                        self._set_default_models()
+                except json.JSONDecodeError:
+                    # Fallback: parse text output (older ollama versions)
+                    self._parse_text_ollama_list(result.stdout)
+            else:
+                # Try without --json flag (older ollama versions)
+                result = subprocess.run(['ollama', 'list'], 
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=5)
+                if result.returncode == 0:
+                    self._parse_text_ollama_list(result.stdout)
+                else:
+                    if hasattr(self, 'console_output'):
+                        self.log("Ollama not found or not responding", "WARNING")
+                    self._set_default_models()
+                    
+        except FileNotFoundError:
+            if hasattr(self, 'console_output'):
+                self.log("Ollama not installed or not in PATH", "WARNING")
+            self._set_default_models()
+        except subprocess.TimeoutExpired:
+            if hasattr(self, 'console_output'):
+                self.log("Ollama command timed out", "WARNING")
+            self._set_default_models()
+        except Exception as e:
+            if hasattr(self, 'console_output'):
+                self.log(f"Error fetching models: {str(e)}", "ERROR")
+            self._set_default_models()
+    
+    def _parse_text_ollama_list(self, output):
+        """Parse text output from 'ollama list' command"""
+        lines = output.strip().split('\n')
+        models = []
+        
+        # Skip header line and parse model names
+        for line in lines[1:]:  # Skip first line (header)
+            parts = line.split()
+            if parts:
+                model_name = parts[0]
+                if model_name and ':' in model_name:
+                    models.append(model_name)
+        
+        if models:
+            current_model = self.ollama_model_combo.currentText()
+            self.ollama_model_combo.clear()
+            self.ollama_model_combo.addItems(sorted(models))
+            
+            index = self.ollama_model_combo.findText(current_model)
+            if index >= 0:
+                self.ollama_model_combo.setCurrentIndex(index)
+            
+            if hasattr(self, 'console_output'):
+                self.log(f"Found {len(models)} Ollama model(s)", "SUCCESS")
+        else:
+            self._set_default_models()
+    
+    def _set_default_models(self):
+        """Set default fallback models"""
+        default_models = ["mistral:latest", "llama3:8b", "llama2:latest", "codellama:latest"]
+        self.ollama_model_combo.clear()
+        self.ollama_model_combo.addItems(default_models)
+        if hasattr(self, 'console_output'):
+            self.log("Using default model list (Ollama may not be running)", "WARNING")
+    
     def toggle_recording(self):
         """Start or stop recording"""
         if not self.recording:
@@ -816,6 +951,7 @@ class FlowBotGUI(QMainWindow):
             # Update UI
             self.mode_combo.setEnabled(False)
             self.vosk_checkbox.setEnabled(False)
+            self.easyocr_checkbox.setEnabled(False)
             self.countdown_checkbox.setEnabled(False)
             
         except Exception as e:
@@ -842,6 +978,7 @@ class FlowBotGUI(QMainWindow):
             # Re-enable controls
             self.mode_combo.setEnabled(True)
             self.vosk_checkbox.setEnabled(True)
+            self.easyocr_checkbox.setEnabled(True)
             self.countdown_checkbox.setEnabled(True)
             
             if session_dir:
@@ -1259,12 +1396,15 @@ class FlowBotGUI(QMainWindow):
         self.progress_bar.setRange(0, 0)  # Indeterminate
         
         use_vosk = self.vosk_checkbox.isChecked()
+        use_easyocr = self.easyocr_checkbox.isChecked()
         transcription_method = "Vosk (offline)" if use_vosk else "Whisper (online)"
+        ocr_engine = "EasyOCR" if use_easyocr else "Tesseract"
         self.log(f"Using transcription: {transcription_method}", "INFO")
+        self.log(f"Using OCR engine: {ocr_engine}", "INFO")
         
         def analyze_task():
             self.log("Running analyzer.analyze_session()...", "INFO")
-            workflow = analyzer.analyze_session(session_dir, use_vosk=use_vosk)
+            workflow = analyzer.analyze_session(session_dir, use_vosk=use_vosk, use_easyocr=use_easyocr)
             if workflow and "session" in workflow:
                 session_id = workflow["session"]
                 self.log(f"Analysis complete for session: {session_id}", "SUCCESS")

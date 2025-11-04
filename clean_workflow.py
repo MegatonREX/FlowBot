@@ -54,6 +54,7 @@ def clean_step(step, step_num):
     modifiers = details.get("modifiers", [])
     ocr = simplify_text(step.get("ocr_text", ""))
     transcripts = step.get("transcripts", [])
+    window = step.get("window", "")  # Get active window name
     
     # Build readable action description
     action_desc = ""
@@ -75,8 +76,14 @@ def clean_step(step, step_num):
     elif action == "key_down":
         action_type = "keyboard"
         
-        # Handle keyboard shortcuts
-        if modifiers:
+        # Determine if Shift is being used for typing (not as a shortcut modifier)
+        # Shift alone is used for typing uppercase, numbers row symbols (!, @, #, %, etc.)
+        shift_only = modifiers == ["shift"]
+        is_single_char = isinstance(key, str) and len(key) == 1
+        is_typing_with_shift = shift_only and is_single_char
+        
+        # Handle keyboard shortcuts (but not Shift for normal typing)
+        if modifiers and not is_typing_with_shift:
             mod_str = format_modifiers(modifiers)
             # Clean up key representation
             if isinstance(key, str):
@@ -152,6 +159,17 @@ def clean_step(step, step_num):
         "description": action_desc,
         "target": target
     }
+    
+    # Add window name if available
+    if window:
+        result["window"] = window
+    
+    # Add coordinates if available (for automation)
+    if action == "mouse_click":
+        x = details.get("x")
+        y = details.get("y")
+        if x is not None and y is not None:
+            result["coordinates"] = {"x": x, "y": y}
     
     # Add transcripts if available
     if transcripts:
@@ -275,6 +293,11 @@ def clean_workflow(infile):
         
         for i, step in enumerate(deduped, 1):
             f.write(f"Step {i}: {step['description']}\n")
+            if "window" in step and step["window"]:
+                f.write(f"  Window: {step['window']}\n")
+            if "coordinates" in step:
+                coords = step["coordinates"]
+                f.write(f"  Coordinates: ({coords['x']}, {coords['y']})\n")
             if "transcripts" in step and step["transcripts"]:
                 f.write(f"  Transcripts: {', '.join(step['transcripts'])}\n")
             f.write("\n")

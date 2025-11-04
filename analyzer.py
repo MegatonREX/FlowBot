@@ -45,6 +45,46 @@ def get_resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+# EasyOCR support
+EASYOCR_AVAILABLE = False
+_easyocr_reader = None
+
+def _ensure_easyocr(languages=['en']):
+    """Initialize EasyOCR reader"""
+    global EASYOCR_AVAILABLE, _easyocr_reader
+    if EASYOCR_AVAILABLE and _easyocr_reader is not None:
+        return _easyocr_reader
+    
+    try:
+        import easyocr
+        print("\033[36m[EasyOCR]\033[0m Initializing reader (first run may download ~500MB models)...")
+        _easyocr_reader = easyocr.Reader(languages, gpu=False)  # Set gpu=True if CUDA available
+        EASYOCR_AVAILABLE = True
+        print("\033[32m[EasyOCR]\033[0m Ready!")
+        return _easyocr_reader
+    except ImportError:
+        print("\033[33m[Warning]\033[0m EasyOCR not installed.")
+        print("\033[33m[Info]\033[0m To install: pip install easyocr")
+        print("\033[33m[Info]\033[0m Note: EasyOCR requires PyTorch (~500MB). Using Tesseract instead.")
+        EASYOCR_AVAILABLE = False
+        return None
+    except OSError as e:
+        if "DLL" in str(e) or "c10.dll" in str(e):
+            print(f"\033[31m[EasyOCR Error]\033[0m PyTorch DLL loading failed: {e}")
+            print("\033[33m[Fix]\033[0m Install Visual C++ Redistributable:")
+            print("\033[33m[Fix]\033[0m https://aka.ms/vs/17/release/vc_redist.x64.exe")
+            print("\033[33m[Fix]\033[0m Or reinstall PyTorch: pip uninstall torch && pip install torch")
+        else:
+            print(f"\033[31m[EasyOCR Error]\033[0m Failed to initialize: {e}")
+        print("\033[36m[Info]\033[0m Falling back to Tesseract OCR")
+        EASYOCR_AVAILABLE = False
+        return None
+    except Exception as e:
+        print(f"\033[31m[EasyOCR Error]\033[0m Failed to initialize: {e}")
+        print("\033[36m[Info]\033[0m Falling back to Tesseract OCR")
+        EASYOCR_AVAILABLE = False
+        return None
+
 # Replace Whisper section with Vosk loading
 VOSK_AVAILABLE = False
 _vosk_recognizer = None
@@ -86,27 +126,51 @@ def _safe_imread(path):
     except Exception:
         return None
 
-def ocr_image(path, ocr_cache=None):
+def ocr_image(path, ocr_cache=None, use_easyocr=False):
     """
-    Read image at path, run OCR (Tesseract), and return text.
+    Read image at path, run OCR (Tesseract or EasyOCR), and return text.
     Uses optional ocr_cache dict to avoid repeated OCR calls.
+    
+    Args:
+        path: Path to image file
+        ocr_cache: Optional dict to cache results
+        use_easyocr: If True, use EasyOCR instead of Tesseract
     """
     if ocr_cache is None:
         ocr_cache = {}
-    if path in ocr_cache:
-        return ocr_cache[path]
+    
+    # Create cache key with OCR engine type
+    cache_key = f"{path}:{'easyocr' if use_easyocr else 'tesseract'}"
+    if cache_key in ocr_cache:
+        return ocr_cache[cache_key]
 
     img = _safe_imread(path)
     if img is None:
-        ocr_cache[path] = ""
+        ocr_cache[cache_key] = ""
         return ""
+    
+    text = ""
     try:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(gray)
-        text = text.strip()
-    except Exception:
+        if use_easyocr:
+            # Try EasyOCR first
+            reader = _ensure_easyocr()
+            if reader:
+                result = reader.readtext(path, detail=0)  # detail=0 returns only text
+                text = " ".join(result).strip()
+                print(f"[EasyOCR] Extracted {len(text)} chars from {os.path.basename(path)}")
+            else:
+                # Fallback to Tesseract if EasyOCR unavailable
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                text = pytesseract.image_to_string(gray).strip()
+        else:
+            # Use Tesseract
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            text = pytesseract.image_to_string(gray).strip()
+    except Exception as e:
+        print(f"[OCR Error] {e}")
         text = ""
-    ocr_cache[path] = text
+    
+    ocr_cache[cache_key] = text
     return text
 
 def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15", session_dir=None):
@@ -176,10 +240,14 @@ def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-e
 # -------------------
 # Core analyzer API
 # -------------------
-def load_session(session_dir):
+def load_session(session_dir, use_easyocr=False):
     """
     Load events.json and precompute OCR for screenshots.
     Returns (events, ocr_cache)
+    
+    Args:
+        session_dir: Path to recording session directory
+        use_easyocr: If True, use EasyOCR for text extraction
     """
     events_path = os.path.join(session_dir, "events.json")
     if not os.path.exists(events_path):
@@ -188,37 +256,49 @@ def load_session(session_dir):
     with open(events_path, "r", encoding="utf-8") as f:
         events = json.load(f)
 
-    # collect screenshots only around events
-    screenshots = [e for e in events if e.get("type") == "screenshot"]
+    # Collect screenshots (including window_change events which have screenshots)
+    # Note: window_change events provide context but won't create workflow steps
+    screenshots = [e for e in events if e.get("type") in ("screenshot", "window_change")]
     screenshots.sort(key=lambda e: e.get("ts", 0))
     ocr_cache = {}
     for s in screenshots:
         fp = s.get("file")
         if fp and os.path.exists(fp):
             # lightweight - only OCR each screenshot once
-            ocr_image(fp, ocr_cache=ocr_cache)
+            ocr_image(fp, ocr_cache=ocr_cache, use_easyocr=use_easyocr)
     return events, ocr_cache
 
 def heuristics_segment(events, ocr_cache):
     """
     Convert raw events into step list using simple heuristics:
-    - Create a step on mouse_click or key_down
+    - Create a step on mouse_click or key_down (but NOT window_change)
     - Attach nearest previous screenshot and OCR text
+    - Track active window name from window_title field
     """
     steps = []
     idx = 0
     for e in events:
+        # Exclude window_change from creating steps, but include it in screenshot lookups
         if e.get("type") in ("mouse_click", "key_down"):
-            # find latest screenshot before this event
-            snaps = [s for s in events if s.get("type") == "screenshot" and s.get("ts", 0) <= e.get("ts", 0)]
+            # find latest screenshot before this event (including window_change screenshots)
+            snaps = [s for s in events if s.get("type") in ("screenshot", "window_change") and s.get("ts", 0) <= e.get("ts", 0)]
             snap = snaps[-1]["file"] if snaps else None
+            
+            # Build cache key for OCR lookup
+            cache_keys = [k for k in ocr_cache.keys() if snap and k.startswith(snap)]
+            ocr_text = ocr_cache.get(cache_keys[0], "") if cache_keys else ""
+            
+            # Extract window title from event details
+            window_title = e.get("window_title", "")
+            
             step = {
                 "step_id": f"step_{idx}",
                 "ts": e.get("ts"),
                 "action": e.get("type"),
                 "details": {k: v for k, v in e.items() if k not in ("ts", "type")},
                 "screenshot": snap,
-                "ocr_text": ocr_cache.get(snap, "") if snap else ""
+                "ocr_text": ocr_text,
+                "window": window_title  # Add active window name to step
             }
             steps.append(step)
             idx += 1
@@ -231,15 +311,24 @@ def summarize_workflow(steps):
     last = (steps[-1].get("ocr_text","") or "")[:120].replace("\n"," ")
     return f"Workflow of {len(steps)} steps. Starts near: '{first}' and ends near: '{last}'."
 
-def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15"):
+def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, use_easyocr=False, model_path="models/vosk-model-small-en-us-0.15"):
     """
     Analyze a single recording session directory and produce workflow JSON.
     Returns the workflow dict.
+    
+    Args:
+        session_dir: Path to recording session
+        out_dir: Output directory for workflow JSON
+        use_vosk: Enable Vosk transcription
+        use_easyocr: Use EasyOCR instead of Tesseract for text extraction
+        model_path: Path to Vosk model
     """
     print(f"\033[36m[Info]\033[0m Analyzing session in {session_dir}")
+    ocr_engine = "EasyOCR" if use_easyocr else "Tesseract"
+    print(f"\033[36m[Info]\033[0m Using {ocr_engine} for text extraction")
     
     # load and OCR
-    events, ocr_cache = load_session(session_dir)
+    events, ocr_cache = load_session(session_dir, use_easyocr=use_easyocr)
     print(f"\033[36m[Info]\033[0m Loaded {len(events)} events")
     
     # Process key events in real-time order
@@ -283,7 +372,7 @@ def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, model_path="
 
     return workflow
 
-def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15"):
+def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_vosk=False, use_easyocr=False, model_path="models/vosk-model-small-en-us-0.15"):
     """
     Convenience: analyze the most recent session in recordings_dir.
     """
@@ -291,7 +380,7 @@ def analyze_latest(recordings_dir=RECORDINGS, out_dir=WORKFLOWS, use_vosk=False,
     if not sessions:
         raise FileNotFoundError("No recording sessions found")
     latest = sessions[-1]
-    return analyze_session(os.path.join(recordings_dir, latest), out_dir=out_dir, use_vosk=use_vosk, model_path=model_path)
+    return analyze_session(os.path.join(recordings_dir, latest), out_dir=out_dir, use_vosk=use_vosk, use_easyocr=use_easyocr, model_path=model_path)
 
 def detect_repeats(read_dir=RECORDINGS):
     """

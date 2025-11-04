@@ -1,9 +1,9 @@
+__pycache__/
 .venv
+anchors
+build
+clean_workflows
+dist
+models
 recordings
 workflows
-anchors
-models
-clean_workflows
-__pycache__/
-dist
-build

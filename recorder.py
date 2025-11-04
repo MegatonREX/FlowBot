@@ -14,13 +14,20 @@ from pynput import mouse, keyboard
 from pynput.keyboard import Key
 import platform
 import cv2  # for efficient image processing
+try:
+    import pygetwindow as gw
+    PYGETWINDOW_AVAILABLE = True
+except ImportError:
+    PYGETWINDOW_AVAILABLE = False
+    print("[Warning] pygetwindow not installed. Install with: pip install pygetwindow")
+    print("[Warning] Falling back to full-screen screenshots")
 
 OUT_DIR = "recordings"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Screenshot configuration
 SCREENSHOT_INTERVAL = 1.0  # seconds between checks
-SCREENSHOT_DIFF_THRESHOLD = 10  # minimum average pixel difference to save
+SCREENSHOT_DIFF_THRESHOLD = 30  # minimum average pixel difference to save
 SCREENSHOT_FORCE_INTERVAL = 10  # force save every 10 seconds if no changes
 
 AUDIO_SAMPLE_RATE = 16000
@@ -40,6 +47,36 @@ def compute_frame_difference(frame1, frame2):
     # Compute absolute difference and average
     diff = np.mean(np.abs(gray2.astype(float) - gray1.astype(float)))
     return diff
+
+
+def _get_foreground_window_info():
+    """Return (title, bbox) for the current foreground window using pygetwindow.
+    bbox is (left, top, right, bottom). Returns (None, None) if pygetwindow unavailable or on error.
+    """
+    try:
+        if not PYGETWINDOW_AVAILABLE:
+            return None, None
+
+        # Get the active window
+        active_window = gw.getActiveWindow()
+        if not active_window:
+            return None, None
+
+        # Get window title
+        title = active_window.title
+
+        # Get window bbox (left, top, right, bottom)
+        # pygetwindow uses (left, top, width, height), convert to (left, top, right, bottom)
+        left = active_window.left
+        top = active_window.top
+        right = left + active_window.width
+        bottom = top + active_window.height
+        bbox = (left, top, right, bottom)
+
+        return title, bbox
+    except Exception as e:
+        # If pygetwindow fails (e.g., on some platforms or edge cases), return None
+        return None, None
 
 class Recorder:
     def __init__(self, out_dir=OUT_DIR, screenshot_interval=SCREENSHOT_INTERVAL,
@@ -63,6 +100,10 @@ class Recorder:
         self.screenshot_cutoff_time = None  # Time when screenshots should stop
         self.audio_buffer = []
 
+        # Active window tracking
+        self.last_active_window = None
+        self.last_active_bbox = None
+
         # Screenshot state tracking
         self.last_screenshot = None
         self.last_screenshot_time = 0
@@ -75,33 +116,76 @@ class Recorder:
             Key.ctrl, Key.ctrl_l, Key.ctrl_r,
             Key.shift, Key.shift_l, Key.shift_r,
             Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr,
-            Key.cmd, Key.cmd_l, Key.cmd_r  # Mac Command key
+            Key.cmd, Key.cmd_l, Key.cmd_r  # Windows key / Command key
         }
+
+        # Windows/apps to ignore (the recorder app itself)
+        self.ignore_windows = [
+            "AGI Assistant",  # Main app name
+            "FlowBot",  # Alternative app name
+            "Visual Studio Code",  # VS Code with project open
+            "Python",  # Python console running the app
+        ]
 
         self._threads = []
         self._mouse_listener = None
         self._key_listener = None
+    
+    def _should_ignore_window(self, window_title):
+        """Check if the current window should be ignored from recording."""
+        if not window_title:
+            return False
         
-    def _capture_event_screenshot(self, ts):
+        # Check if any ignore pattern matches the window title (case-insensitive partial match)
+        for ignore_pattern in self.ignore_windows:
+            if ignore_pattern.lower() in window_title.lower():
+                return True
+        return False
+        
+    def _get_active_window_bbox(self):
+        """Return bbox tuple (left, top, right, bottom) for active window or None."""
+        try:
+            _, bbox = _get_foreground_window_info()
+            return bbox
+        except Exception:
+            return None
+
+    def _capture_event_screenshot(self, ts, window_title=None):
         """
         Capture and save a screenshot triggered by an event (click/keypress).
         Uses a lock to prevent concurrent screenshot saves.
         Returns the path to the saved screenshot.
         Skips if we're in the cutoff period before stopping.
+        Skips if window is in the ignore list (no need for screenshots of the app itself).
         """
         # Don't capture if we're in the stop buffer period
         if self.screenshot_cutoff_time and ts >= self.screenshot_cutoff_time:
             print(f"\033[90m[Screenshot]\033[0m Skipped (stopping soon)\033[0m")
             return None
-            
+
+        # Skip screenshots for ignored windows (but still allow event capture)
+        if window_title and self._should_ignore_window(window_title):
+            return None
+
+        # Determine active-window bbox if available
+        bbox = self._get_active_window_bbox()
+
         with self._screenshot_lock:
             try:
-                img = ImageGrab.grab()
+                if bbox:
+                    img = ImageGrab.grab(bbox=bbox)
+                else:
+                    img = ImageGrab.grab()
+
                 path = os.path.join(self.session_dir, f"screenshot_{self.screenshot_count:05d}.png")
                 img.save(path)
                 self.screenshot_count += 1
                 self.last_screenshot = img
                 self.last_screenshot_time = ts
+                # remember last bbox used
+                if bbox:
+                    self.last_active_bbox = bbox
+
                 print(f"\033[36m[Screenshot]\033[0m Saved event-triggered capture to {os.path.basename(path)}")
                 return path
             except Exception as e:
@@ -130,16 +214,53 @@ class Recorder:
                 continue
                 
             try:
-                current_frame = ImageGrab.grab()
-                
+                # Get active window info (title and bbox). If not available, bbox will be None
+                active_title, active_bbox = _get_foreground_window_info()
+
+                # If active window changed, force a screenshot and mark window change
+                # BUT skip if it's an ignored window
+                if active_title and active_title != self.last_active_window:
+                    # Skip recording window changes to ignored apps
+                    if self._should_ignore_window(active_title):
+                        self.last_active_window = active_title
+                        self.last_active_bbox = active_bbox
+                        time.sleep(self.screenshot_interval)
+                        continue
+                    
+                    self.last_active_window = active_title
+                    self.last_active_bbox = active_bbox
+                    with self._screenshot_lock:
+                        # capture using active bbox when possible
+                        if active_bbox:
+                            frame = ImageGrab.grab(bbox=active_bbox)
+                        else:
+                            frame = ImageGrab.grab()
+                        path = os.path.join(self.session_dir, f"screenshot_{self.screenshot_count:05d}.png")
+                        frame.save(path)
+                        self.events.append({"ts": ts, "type": "window_change", "file": path, "window_title": active_title})
+                        self.screenshot_count += 1
+                        self.last_screenshot = frame
+                        self.last_screenshot_time = ts
+                        last_force_save = ts
+                        print(f"\033[36m[Screenshot]\033[0m Window changed -> saved {os.path.basename(path)} ({active_title})")
+                        # continue to next loop to avoid double-saving
+                        time.sleep(self.screenshot_interval)
+                        continue
+
+                # Capture current frame for diff comparison (prefer active bbox)
+                if active_bbox:
+                    current_frame = ImageGrab.grab(bbox=active_bbox)
+                else:
+                    current_frame = ImageGrab.grab()
+
                 # Compute difference from last saved frame
                 diff = compute_frame_difference(self.last_screenshot, current_frame)
-                
+
                 # Check conditions for saving
                 significant_change = diff >= SCREENSHOT_DIFF_THRESHOLD
                 time_since_last_save = ts - last_force_save
                 should_force_save = time_since_last_save >= SCREENSHOT_FORCE_INTERVAL
-                
+
                 # Save if we detect changes or it's time for forced save
                 if significant_change or should_force_save:
                     with self._screenshot_lock:
@@ -150,17 +271,17 @@ class Recorder:
                         self.last_screenshot = current_frame
                         self.last_screenshot_time = ts
                         last_force_save = ts
-                        
+
                         if significant_change:
                             print(f"\033[36m[Screenshot]\033[0m Saved on change (diff: {diff:.1f})")
                         else:
                             print(f"\033[36m[Screenshot]\033[0m Periodic save after {time_since_last_save:.1f}s")
                 else:
                     print(f"\033[90m[Screenshot]\033[0m No significant changes (diff: {diff:.1f})\033[0m", end="\r")
-                    
+
             except Exception as e:
                 print(f"\033[31m[Error]\033[0m Screenshot error: {e}")
-                
+
             # Sleep for the interval
             time.sleep(self.screenshot_interval)
 
@@ -208,24 +329,34 @@ class Recorder:
 
     # input listeners
     def _on_move(self, x, y):
-        self.events.append({"ts": time.time(), "type": "mouse_move", "x": x, "y": y})
+        active_window, _ = _get_foreground_window_info()
+        self.events.append({"ts": time.time(), "type": "mouse_move", "x": x, "y": y, "window_title": active_window})
 
     def _on_click(self, x, y, button, pressed):
         ts = time.time()
+        
+        # Get active window title for context
+        window_title, _ = _get_foreground_window_info()
+        
         event = {"ts": ts, "type": "mouse_click", "x": x, "y": y,
                  "button": str(button), "pressed": pressed}
         
+        # Add window title if available
+        if window_title:
+            event["window_title"] = window_title
+        
         # Take screenshot on mouse click (when pressed, not released)
         if pressed:
-            screenshot_path = self._capture_event_screenshot(ts)
+            screenshot_path = self._capture_event_screenshot(ts, window_title)
             if screenshot_path:
                 event["screenshot"] = screenshot_path
-                print(f"\033[36m[Screenshot]\033[0m Captured on mouse click")
+                print(f"\033[36m[Screenshot]\033[0m Captured on mouse click in: {window_title or 'Unknown'}")
                 
         self.events.append(event)
 
     def _on_scroll(self, x, y, dx, dy):
-        self.events.append({"ts": time.time(), "type": "mouse_scroll", "x": x, "y": y, "dx": dx, "dy": dy})
+        window_title, _ = _get_foreground_window_info()
+        self.events.append({"ts": time.time(), "type": "mouse_scroll", "x": x, "y": y, "dx": dx, "dy": dy, "window_title": window_title})
 
     def _get_key_string(self, key):
         """Convert key to string representation"""
@@ -242,6 +373,9 @@ class Recorder:
         if key in self.modifier_keys:
             self.pressed_modifiers.add(key)
         
+        # Get active window title for context
+        window_title, _ = _get_foreground_window_info()
+        
         # Build modifiers string for the event
         modifiers = []
         if any(k in self.pressed_modifiers for k in [Key.ctrl, Key.ctrl_l, Key.ctrl_r]):
@@ -252,32 +386,44 @@ class Recorder:
             modifiers.append("alt")
         if any(k in self.pressed_modifiers for k in [Key.cmd, Key.cmd_l, Key.cmd_r]):
             modifiers.append("cmd")
-        
+
         event = {
-            "ts": ts, 
-            "type": "key_down", 
+            "ts": ts,
+            "type": "key_down",
             "key": k,
             "modifiers": modifiers if modifiers else []
         }
         
+        # Add window title if available
+        if window_title:
+            event["window_title"] = window_title
+
         # DON'T record standalone modifier key presses - they're just part of shortcuts
         if key in self.modifier_keys:
             # Skip recording this event - modifiers are tracked but not logged separately
             return
-        
-        # Only capture screenshot on Enter key WITHOUT modifiers
-        # This prevents screenshots when doing shortcuts like Cmd+Enter
-        if k == 'Key.enter' and not modifiers:
-            screenshot_path = self._capture_event_screenshot(ts)
+
+        # Determine if this key press should capture a screenshot.
+        # Capture when:
+        #  - it's a special Key (e.g. Key.enter, Key.tab, Key.esc, Key.f1...)
+        #  - or when a modifier combination was used (e.g. Ctrl+S)
+        capture_on_key = False
+        if isinstance(k, str) and k.startswith('Key.'):
+            capture_on_key = True
+        if modifiers:
+            capture_on_key = True
+
+        if capture_on_key:
+            screenshot_path = self._capture_event_screenshot(ts, window_title)
             if screenshot_path:
                 event["screenshot"] = screenshot_path
-                print(f"\033[36m[Screenshot]\033[0m Captured on Enter key press")
-        
+                print(f"\033[36m[Screenshot]\033[0m Captured on key press ({k}) in: {window_title or 'Unknown'}")
+
         # Log keyboard shortcuts for debugging
         if modifiers and key not in self.modifier_keys:
             shortcut = "+".join(modifiers) + "+" + k
-            print(f"\033[33m[Shortcut]\033[0m {shortcut}")
-            
+            print(f"\033[33m[Shortcut]\033[0m {shortcut} in: {window_title or 'Unknown'}")
+
         self.events.append(event)
 
     def _on_release(self, key):
