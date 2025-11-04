@@ -226,7 +226,7 @@ def query_ollama(prompt, system_prompt=SYSTEM_PROMPT, stream=True, model_name=No
         print(f"🤖 Querying Ollama ({selected_model})...\n")
         print("=" * 70)
         
-        response = requests.post(OLLAMA_URL, json=payload, stream=stream, timeout=200)
+        response = requests.post(OLLAMA_URL, json=payload, stream=stream, timeout=250)
         response.raise_for_status()
         
         full_response = ""
