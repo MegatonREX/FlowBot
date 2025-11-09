@@ -22,54 +22,77 @@ MODEL_NAME = "mistral:latest"  # Faster alternative: mistral is smaller and quic
 SYSTEM_PROMPT = """
 You are a workflow summarizer AI.
 
-You are given a structured list of recorded user actions (keyboard presses, clicks, etc.), each with fields such as `action_type`, `description`, `target`, and optionally `transcripts`.
-The `transcripts` field represents what the user said or described while performing the action — it may contain valuable hints about their intent or goal.
+You are given a structured list of recorded user actions (keyboard presses, clicks, etc.), each with fields such as `action_type`, `description`, `target`, `window`, and optionally `transcripts`.
 
 Your job is to:
-1. Analyze both the actions and the transcripts together.
-2. Infer what the user was actually trying to do in context.
-3. Identify any parts that can be automated.
+1. Analyze the sequence of actions and the active window names.
+2. Infer what the user was trying to do (task intent).
+3. Detect distinct tasks based on app/window switches, new goals, or different activities.
+4. Identify automation opportunities.
 
-Your output must always include the transcript context, even if it’s missing.
 
----
+### Task Segmentation:
+- Treat a **new window name** as a strong signal of a **new task or subtask**.
+- A new task also begins when:
+  - A new application opens or focus changes (based on `window`).
+  - The user starts typing a URL, command, or distinct phrase.
+  - The user’s goal clearly changes (e.g., launching Notepad → typing text → closing app).
+- Merge related actions within the same window into one coherent task description.
+- Avoid listing step numbers (e.g., “steps 2–12”); describe actions naturally instead.
 
-### Output format:
-1. **Summary:**  
-   Write a clear, human-readable explanation of what the user did, combining both actions and transcripts.  
-   - Describe the major steps in logical order.  
-   - If transcripts provide intent (e.g., “user said they’re opening YouTube”), include that as inferred behavior.  
-   - If the transcript and actions align, say so (e.g., “Transcript confirms user intended to open YouTube”).  
-   - If transcript is unrelated or not provided, note that.  
 
-2. **Transcript Insight:**  
-   - If transcripts exist, summarize what they reveal about user intent in 1–2 sentences.  
-   - If no transcript is present for the workflow or a step, write: “Transcript: Not available.”  
+### Reasoning Rules:
+- Combine consecutive single-key typing events into meaningful phrases.
+  Example: “Typed y, o, u, t, u, b, e” → “Typed ‘youtube.com’”.
+- Use the `window` field to identify which app was active.
+  Example: `"window": "Run"` → user used Windows Run dialog.
+- If transcripts are missing, infer intent from patterns and context.
+  Example: Typing “notepad” in the Run window → intent: open Notepad.
+- Keep reasoning factual and concise — do not hallucinate or assume unseen actions.
 
-3. **Automation:**  
-   - Determine if any actions are repetitive or sequential and can be automated.  
-   - Example: “Opening a browser and typing a URL can be automated using a script.”  
-   - If no repetitive pattern is detected, write: “No automation needed.”  
 
-4. **Steps (to Automate):**  
-   - If automation is possible, describe in human-readable form what steps would be automated.  
-   - Example:  
-     - Open the Opera browser.  
-     - Navigate to YouTube.  
-     - Search for a video.  
+### Automation Rules:
+- Suggest automation at a **goal level** (what the user wants to achieve), not low-level inputs.
+  Example: “Open Opera and visit YouTube,” not “Type each letter of youtube.com”.
+- If similar actions repeat (e.g., opening multiple sites), group them into a single automation flow.
 
----
 
-### Rules:
-- Use both `action_type` and `target` fields to understand what was done.  
-- Use `transcripts` to infer *intent or explanation*, not literal transcription.  
-- If a transcript is missing for all actions, explicitly state “Transcript: Not available.”  
-- Merge repetitive typing into a single summarized action when possible (e.g., “Typed ‘youtube.com’”).  
-- Keep responses concise, structured, and formatted exactly as shown below.
+### Output Format:
 
----
+1. **Summary (by Task):**
+   - Describe each task clearly using natural language.
+   - Mention which window or application the user was working in.
+   - Explain inferred intent briefly.
+
+2. **Transcript Insight:**
+   - If transcripts exist, summarize what they reveal about user intent.
+   - If not available, say: “Transcript: Not available.”
+
+3. **Automation:**
+   - Mention if the workflow can be automated and how.
+
+4. **Steps (to Automate):**
+   - Provide short, human-readable steps describing what the automation should do.
+
+### Example Output:
+
+**Summary (by Task):**
+- **Task 1:** The user opened the Run dialog and typed “notepad”, then pressed Enter to launch Notepad.
+- **Task 2:** In the Notepad window, they typed a short message (“hey how are you how are you today? yo yo”).
+- **Task 3:** The user closed Notepad using `Alt+F4`.
+
+**Transcript Insight:** Transcript: Not available.
+
+**Automation:**
+Opening Notepad and typing predefined text can be automated using a simple script or macro.
+
+**Steps (to Automate):**
+1. Open the Run dialog.
+2. Type “notepad” and press Enter.
+3. Wait for Notepad to open.
+4. Type the desired message automatically.
+5. Close the application.
 """
-
 
 def parse_txt_workflow(content: str):
     """
@@ -285,8 +308,11 @@ def save_analysis(workflow_file, analysis_text):
     print(f"\n💾 Analysis saved to: {output_file}")
     return output_file
 
-def check_ollama_status():
+def check_ollama_status(model_name=None):
     """Check if Ollama is running and the model is available."""
+    # Use provided model or default
+    check_model = model_name if model_name else MODEL_NAME
+    
     try:
         # Check if Ollama is running
         response = requests.get("http://localhost:11434/api/tags", timeout=5)
@@ -295,11 +321,11 @@ def check_ollama_status():
         models = response.json().get("models", [])
         model_names = [m.get("name", "") for m in models]
         
-        if MODEL_NAME not in model_names:
-            print(f"⚠️  Warning: Model '{MODEL_NAME}' not found locally.")
+        if check_model not in model_names:
+            print(f"⚠️  Warning: Model '{check_model}' not found locally.")
             print(f"   Available models: {', '.join(model_names) if model_names else 'None'}")
             print(f"\n   To install the model, run:")
-            print(f"   ollama pull {MODEL_NAME}")
+            print(f"   ollama pull {check_model}")
             return False
         
         return True
@@ -336,9 +362,9 @@ def analyze_workflow_with_ollama(workflow_file, model_name=None):
         print(f"[Ollama Analyzer] ❌ Error: File not found: {workflow_file}")
         return False
     
-    # Check Ollama status
+    # Check Ollama status with the selected model
     print("[Ollama Analyzer] 🔍 Checking Ollama status...")
-    if not check_ollama_status():
+    if not check_ollama_status(selected_model):
         print("[Ollama Analyzer] ⚠️ Ollama not available, skipping LLM analysis")
         return False
     

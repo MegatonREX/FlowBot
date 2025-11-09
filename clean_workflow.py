@@ -252,25 +252,14 @@ def clean_workflow(infile):
         if i == 0 or s["description"] != clean_steps[i-1]["description"]:
             deduped.append(s)
 
-    # Generate natural language summary
-    natural_summary = generate_natural_summary(deduped)
-    
-    # Create LLM-friendly output
+    # Create minimal cleaned output (no summaries or LLM prompt templates)
     cleaned = {
         "metadata": {
             "session_id": session_id,
             "recorded_at": generated_at,
-            "total_steps": len(deduped),
-            "original_summary": summary
+            "total_steps": len(deduped)
         },
-        "workflow_summary": natural_summary,
-        "actions": deduped,
-        "llm_prompt_template": (
-            "This workflow shows a user performing the following actions:\n"
-            f"{natural_summary}\n\n"
-            "Detailed steps:\n" + 
-            "\n".join([f"{i+1}. {s['description']}" for i, s in enumerate(deduped)])
-        )
+        "actions": deduped
     }
 
     # Save cleaned workflow
@@ -280,15 +269,14 @@ def clean_workflow(infile):
     with open(outpath, "w", encoding="utf-8") as f:
         json.dump(cleaned, f, indent=2, ensure_ascii=False)
 
-    # Also save a plain text version for easy LLM ingestion
+    # Also save a plain text version for easy human reading
     txt_outpath = outpath.replace(".json", ".txt")
     with open(txt_outpath, "w", encoding="utf-8") as f:
         f.write(f"SESSION: {session_id}\n")
         f.write(f"RECORDED: {generated_at}\n")
         f.write(f"TOTAL ACTIONS: {len(deduped)}\n")
-        f.write(f"\nWORKFLOW SUMMARY:\n{natural_summary}\n")
         f.write(f"\n{'='*60}\n")
-        f.write(f"DETAILED ACTIONS:\n")
+        f.write(f"ACTIONS:\n")
         f.write(f"{'='*60}\n\n")
         
         for i, step in enumerate(deduped, 1):
@@ -304,7 +292,6 @@ def clean_workflow(infile):
 
     print(f"✓ Cleaned JSON workflow: {outpath}")
     print(f"✓ Plain text version: {txt_outpath}")
-    print(f"\n📋 Summary: {natural_summary}")
     print(f"📊 Total actions: {len(deduped)}")
     
     return cleaned
