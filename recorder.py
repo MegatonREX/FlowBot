@@ -493,6 +493,7 @@ class Recorder:
         cutoff_time = self.screenshot_cutoff_time
         filtered_events = []
         removed_screenshots = []
+        removed_clicks = 0
         
         for event in self.events:
             # Always keep audio_recording events regardless of timestamp
@@ -501,6 +502,10 @@ class Recorder:
             elif event.get('ts', 0) < cutoff_time:
                 filtered_events.append(event)
             else:
+                # Count removed clicks (the stop recording click)
+                if event.get('type') == 'mouse_click':
+                    removed_clicks += 1
+                
                 # Delete screenshot files that were captured during stop period
                 if event.get('type') == 'screenshot' and 'file' in event:
                     try:
@@ -519,6 +524,9 @@ class Recorder:
                         print(f"\033[31m[Error]\033[0m Failed to delete event screenshot: {e}")
         
         self.events = filtered_events
+        
+        if removed_clicks > 0:
+            print(f"\033[33m[Cleanup]\033[0m Removed {removed_clicks} stop-recording click(s)")
         
         if removed_screenshots:
             print(f"\033[33m[Cleanup]\033[0m Removed {len(removed_screenshots)} screenshot(s) from stop period")

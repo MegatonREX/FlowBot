@@ -45,47 +45,7 @@ def get_resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-# EasyOCR support
-EASYOCR_AVAILABLE = False
-_easyocr_reader = None
-
-def _ensure_easyocr(languages=['en']):
-    """Initialize EasyOCR reader"""
-    global EASYOCR_AVAILABLE, _easyocr_reader
-    if EASYOCR_AVAILABLE and _easyocr_reader is not None:
-        return _easyocr_reader
-    
-    try:
-        import easyocr
-        print("\033[36m[EasyOCR]\033[0m Initializing reader (first run may download ~500MB models)...")
-        _easyocr_reader = easyocr.Reader(languages, gpu=False)  # Set gpu=True if CUDA available
-        EASYOCR_AVAILABLE = True
-        print("\033[32m[EasyOCR]\033[0m Ready!")
-        return _easyocr_reader
-    except ImportError:
-        print("\033[33m[Warning]\033[0m EasyOCR not installed.")
-        print("\033[33m[Info]\033[0m To install: pip install easyocr")
-        print("\033[33m[Info]\033[0m Note: EasyOCR requires PyTorch (~500MB). Using Tesseract instead.")
-        EASYOCR_AVAILABLE = False
-        return None
-    except OSError as e:
-        if "DLL" in str(e) or "c10.dll" in str(e):
-            print(f"\033[31m[EasyOCR Error]\033[0m PyTorch DLL loading failed: {e}")
-            print("\033[33m[Fix]\033[0m Install Visual C++ Redistributable:")
-            print("\033[33m[Fix]\033[0m https://aka.ms/vs/17/release/vc_redist.x64.exe")
-            print("\033[33m[Fix]\033[0m Or reinstall PyTorch: pip uninstall torch && pip install torch")
-        else:
-            print(f"\033[31m[EasyOCR Error]\033[0m Failed to initialize: {e}")
-        print("\033[36m[Info]\033[0m Falling back to Tesseract OCR")
-        EASYOCR_AVAILABLE = False
-        return None
-    except Exception as e:
-        print(f"\033[31m[EasyOCR Error]\033[0m Failed to initialize: {e}")
-        print("\033[36m[Info]\033[0m Falling back to Tesseract OCR")
-        EASYOCR_AVAILABLE = False
-        return None
-
-# Replace Whisper section with Vosk loading
+# Vosk initialization
 VOSK_AVAILABLE = False
 _vosk_recognizer = None
 
@@ -126,51 +86,36 @@ def _safe_imread(path):
     except Exception:
         return None
 
-def ocr_image(path, ocr_cache=None, use_easyocr=False):
+def ocr_image(path, ocr_cache=None):
     """
-    Read image at path, run OCR (Tesseract or EasyOCR), and return text.
+    Read image at path, run OCR with Tesseract, and return text.
     Uses optional ocr_cache dict to avoid repeated OCR calls.
     
     Args:
         path: Path to image file
         ocr_cache: Optional dict to cache results
-        use_easyocr: If True, use EasyOCR instead of Tesseract
     """
     if ocr_cache is None:
         ocr_cache = {}
     
-    # Create cache key with OCR engine type
-    cache_key = f"{path}:{'easyocr' if use_easyocr else 'tesseract'}"
-    if cache_key in ocr_cache:
-        return ocr_cache[cache_key]
+    if path in ocr_cache:
+        return ocr_cache[path]
 
     img = _safe_imread(path)
     if img is None:
-        ocr_cache[cache_key] = ""
+        ocr_cache[path] = ""
         return ""
     
     text = ""
     try:
-        if use_easyocr:
-            # Try EasyOCR first
-            reader = _ensure_easyocr()
-            if reader:
-                result = reader.readtext(path, detail=0)  # detail=0 returns only text
-                text = " ".join(result).strip()
-                print(f"[EasyOCR] Extracted {len(text)} chars from {os.path.basename(path)}")
-            else:
-                # Fallback to Tesseract if EasyOCR unavailable
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                text = pytesseract.image_to_string(gray).strip()
-        else:
-            # Use Tesseract
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            text = pytesseract.image_to_string(gray).strip()
+        # Use Tesseract
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        text = pytesseract.image_to_string(gray).strip()
     except Exception as e:
         print(f"[OCR Error] {e}")
         text = ""
     
-    ocr_cache[cache_key] = text
+    ocr_cache[path] = text
     return text
 
 def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15", session_dir=None):
@@ -240,14 +185,13 @@ def transcribe_audio(path, use_vosk=False, model_path="models/vosk-model-small-e
 # -------------------
 # Core analyzer API
 # -------------------
-def load_session(session_dir, use_easyocr=False):
+def load_session(session_dir):
     """
     Load events.json and precompute OCR for screenshots.
     Returns (events, ocr_cache)
     
     Args:
         session_dir: Path to recording session directory
-        use_easyocr: If True, use EasyOCR for text extraction
     """
     events_path = os.path.join(session_dir, "events.json")
     if not os.path.exists(events_path):
@@ -265,7 +209,7 @@ def load_session(session_dir, use_easyocr=False):
         fp = s.get("file")
         if fp and os.path.exists(fp):
             # lightweight - only OCR each screenshot once
-            ocr_image(fp, ocr_cache=ocr_cache, use_easyocr=use_easyocr)
+            ocr_image(fp, ocr_cache=ocr_cache)
     return events, ocr_cache
 
 def heuristics_segment(events, ocr_cache):
@@ -311,7 +255,7 @@ def summarize_workflow(steps):
     last = (steps[-1].get("ocr_text","") or "")[:120].replace("\n"," ")
     return f"Workflow of {len(steps)} steps. Starts near: '{first}' and ends near: '{last}'."
 
-def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, use_easyocr=False, model_path="models/vosk-model-small-en-us-0.15"):
+def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, model_path="models/vosk-model-small-en-us-0.15"):
     """
     Analyze a single recording session directory and produce workflow JSON.
     Returns the workflow dict.
@@ -320,15 +264,13 @@ def analyze_session(session_dir, out_dir=WORKFLOWS, use_vosk=False, use_easyocr=
         session_dir: Path to recording session
         out_dir: Output directory for workflow JSON
         use_vosk: Enable Vosk transcription
-        use_easyocr: Use EasyOCR instead of Tesseract for text extraction
         model_path: Path to Vosk model
     """
     print(f"\033[36m[Info]\033[0m Analyzing session in {session_dir}")
-    ocr_engine = "EasyOCR" if use_easyocr else "Tesseract"
-    print(f"\033[36m[Info]\033[0m Using {ocr_engine} for text extraction")
+    print(f"\033[36m[Info]\033[0m Using Tesseract for text extraction")
     
     # load and OCR
-    events, ocr_cache = load_session(session_dir, use_easyocr=use_easyocr)
+    events, ocr_cache = load_session(session_dir)
     print(f"\033[36m[Info]\033[0m Loaded {len(events)} events")
     
     # Process key events in real-time order

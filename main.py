@@ -127,7 +127,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AGI Assistant main orchestrator")
     parser.add_argument("--mode", choices=["once", "continuous"], default="once",
                         help="once: record one session and analyze it; continuous: keep recording and auto-analyze")
-    parser.add_argument("--vosk", action="store_true", help="Use Vosk transcription instead of Whisper")
+    parser.add_argument("--vosk", action="store_true", help="Enable Vosk transcription (offline)")
     args = parser.parse_args()
 
     # 🔹 Force Vosk as default unless explicitly disabled

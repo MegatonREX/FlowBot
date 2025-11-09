@@ -42,12 +42,9 @@ PyInstaller.__main__.run([
     '--hidden-import=pyautogui',
     '--hidden-import=requests',
     '--hidden-import=pygetwindow',
-    '--hidden-import=easyocr',
-    '--hidden-import=torch',
     '--collect-all=PyQt6',
     '--collect-all=vosk',
     '--collect-all=sounddevice',
-    '--collect-all=easyocr',
     '--noconfirm',                      # Overwrite without asking
 ])
 

@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QListWidget, QTabWidget,
     QGroupBox, QMessageBox, QFileDialog, QSplitter, QStatusBar,
-    QComboBox, QCheckBox, QProgressBar, QListWidgetItem
+    QComboBox, QCheckBox, QProgressBar, QListWidgetItem, QScrollArea, QSlider
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot, QObject
 from PyQt6.QtGui import QIcon, QFont, QColor, QPalette, QTextCursor
@@ -74,6 +74,8 @@ class FlowBotGUI(QMainWindow):
         self.recording = False
         self.current_session_dir = None
         self.worker_thread = None
+        self.current_screenshot_pixmap = None
+        self.current_screenshot_path = None
         
         # Setup console output redirection
         self.setup_console_redirect()
@@ -313,12 +315,6 @@ class FlowBotGUI(QMainWindow):
         self.vosk_checkbox.setChecked(True)
         recording_layout.addWidget(self.vosk_checkbox)
         
-        # OCR Engine selection
-        self.easyocr_checkbox = QCheckBox("Use EasyOCR (Better accuracy)")
-        self.easyocr_checkbox.setChecked(False)
-        self.easyocr_checkbox.setToolTip("EasyOCR provides better text recognition but slower. Unchecked uses Tesseract (faster).")
-        recording_layout.addWidget(self.easyocr_checkbox)
-        
         self.auto_analyze_checkbox = QCheckBox("Auto-analyze")
         self.auto_analyze_checkbox.setChecked(True)
         recording_layout.addWidget(self.auto_analyze_checkbox)
@@ -504,10 +500,12 @@ class FlowBotGUI(QMainWindow):
         """Create screenshot viewer tab"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+        layout.setSpacing(5)  # Reduce spacing
         
-        # Info label
-        info = QLabel("📸 View captured screenshots from recording session")
-        info.setStyleSheet("color: #0e639c; padding: 10px; font-size: 11pt;")
+        # Info label - smaller and more compact
+        info = QLabel("📸 Screenshots")
+        info.setStyleSheet("color: #0e639c; padding: 3px; font-size: 10pt; font-weight: bold;")
         layout.addWidget(info)
         
         # Create splitter for list and preview
@@ -519,6 +517,7 @@ class FlowBotGUI(QMainWindow):
         list_layout.setContentsMargins(0, 0, 0, 0)
         
         list_label = QLabel("Screenshots:")
+        list_label.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 2px;")
         list_layout.addWidget(list_label)
         
         self.screenshot_list = QListWidget()
@@ -533,19 +532,64 @@ class FlowBotGUI(QMainWindow):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         
         preview_label = QLabel("Preview:")
+        preview_label.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 2px;")
         preview_layout.addWidget(preview_label)
+        
+        # Scroll area for screenshot
+        self.screenshot_scroll_area = QScrollArea()
+        self.screenshot_scroll_area.setWidgetResizable(False)  # Don't auto-resize, let us control it
+        self.screenshot_scroll_area.setStyleSheet("QScrollArea { border: 1px solid #3a3a3a; background-color: #252525; }")
+        self.screenshot_scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.screenshot_preview = QLabel()
         self.screenshot_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.screenshot_preview.setStyleSheet("border: 1px solid #3a3a3a; background-color: #252525; padding: 10px;")
         self.screenshot_preview.setText("Select a screenshot to preview")
+        self.screenshot_preview.setStyleSheet("background-color: #252525; padding: 2px; color: #888888;")
         self.screenshot_preview.setScaledContents(False)
-        preview_layout.addWidget(self.screenshot_preview)
         
-        # Screenshot info
+        self.screenshot_scroll_area.setWidget(self.screenshot_preview)
+        preview_layout.addWidget(self.screenshot_scroll_area, 1)  # Add stretch factor to expand
+        
+        # Screenshot info and controls
+        info_controls_layout = QHBoxLayout()
+        
         self.screenshot_info = QLabel("")
         self.screenshot_info.setStyleSheet("padding: 5px; color: #888888;")
-        preview_layout.addWidget(self.screenshot_info)
+        info_controls_layout.addWidget(self.screenshot_info, 1)
+        
+        # Zoom controls
+        zoom_layout = QHBoxLayout()
+        
+        fit_button = QPushButton("Fit to Window")
+        fit_button.clicked.connect(self.fit_screenshot_to_window)
+        fit_button.setMaximumWidth(120)
+        zoom_layout.addWidget(fit_button)
+        
+        actual_size_button = QPushButton("100%")
+        actual_size_button.clicked.connect(lambda: self.zoom_slider.setValue(100))
+        actual_size_button.setMaximumWidth(80)
+        zoom_layout.addWidget(actual_size_button)
+        
+        zoom_label = QLabel("Zoom:")
+        zoom_layout.addWidget(zoom_label)
+        
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setMinimum(10)
+        self.zoom_slider.setMaximum(200)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(150)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+        zoom_layout.addWidget(self.zoom_slider)
+        
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setFixedWidth(45)
+        zoom_layout.addWidget(self.zoom_label)
+        
+        info_controls_layout.addLayout(zoom_layout)
+        preview_layout.addLayout(info_controls_layout)
+        
+        # Store original pixmap for zooming
+        self.current_screenshot_pixmap = None
         
         splitter.addWidget(preview_widget)
         splitter.setSizes([300, 700])
@@ -951,7 +995,6 @@ class FlowBotGUI(QMainWindow):
             # Update UI
             self.mode_combo.setEnabled(False)
             self.vosk_checkbox.setEnabled(False)
-            self.easyocr_checkbox.setEnabled(False)
             self.countdown_checkbox.setEnabled(False)
             
         except Exception as e:
@@ -978,7 +1021,6 @@ class FlowBotGUI(QMainWindow):
             # Re-enable controls
             self.mode_combo.setEnabled(True)
             self.vosk_checkbox.setEnabled(True)
-            self.easyocr_checkbox.setEnabled(True)
             self.countdown_checkbox.setEnabled(True)
             
             if session_dir:
@@ -1171,6 +1213,8 @@ class FlowBotGUI(QMainWindow):
         self.screenshot_preview.clear()
         self.screenshot_preview.setText("Select a screenshot to preview")
         self.screenshot_info.setText("")
+        self.current_screenshot_pixmap = None
+        self.current_screenshot_path = None
         
         screenshot_dir = Path("recordings") / session_id
         if not screenshot_dir.exists():
@@ -1192,34 +1236,106 @@ class FlowBotGUI(QMainWindow):
     def on_screenshot_selected(self, item):
         """Handle screenshot selection and display preview"""
         from PyQt6.QtGui import QPixmap
+        import os
         
         screenshot_path = item.data(Qt.ItemDataRole.UserRole)
+        
+        self.log(f"Loading screenshot: {screenshot_path}", "INFO")
+        
+        # Check if file exists
+        if not os.path.exists(screenshot_path):
+            self.screenshot_preview.setText(f"File not found:\n{screenshot_path}")
+            self.log(f"Screenshot file not found: {screenshot_path}", "ERROR")
+            return
         
         try:
             pixmap = QPixmap(screenshot_path)
             
             if not pixmap.isNull():
-                # Scale to fit preview area while maintaining aspect ratio
-                scaled_pixmap = pixmap.scaled(
-                    self.screenshot_preview.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.screenshot_preview.setPixmap(scaled_pixmap)
+                # Store original pixmap for zooming
+                self.current_screenshot_pixmap = pixmap
+                self.current_screenshot_path = screenshot_path
+                
+                self.log(f"Pixmap loaded: {pixmap.width()}x{pixmap.height()}", "INFO")
+                
+                # Auto-fit to window on first load
+                self.fit_screenshot_to_window()
                 
                 # Show file info
                 file_size = Path(screenshot_path).stat().st_size / 1024  # KB
                 file_info = f"File: {Path(screenshot_path).name} | Size: {file_size:.1f} KB | Resolution: {pixmap.width()}x{pixmap.height()}"
                 self.screenshot_info.setText(file_info)
                 
-                self.log(f"Displaying screenshot: {Path(screenshot_path).name}", "INFO")
+                self.log(f"Screenshot displayed successfully", "INFO")
             else:
-                self.screenshot_preview.setText("Failed to load image")
-                self.log(f"Failed to load screenshot: {screenshot_path}", "ERROR")
+                self.screenshot_preview.setText("Failed to load image\n(Pixmap is null)")
+                self.log(f"Failed to load screenshot: Pixmap is null for {screenshot_path}", "ERROR")
                 
         except Exception as e:
-            self.screenshot_preview.setText(f"Error loading image: {str(e)}")
+            self.screenshot_preview.setText(f"Error loading image:\n{str(e)}")
             self.log(f"Error loading screenshot: {str(e)}", "ERROR")
+            import traceback
+            traceback.print_exc()
+    
+    def on_zoom_changed(self, value):
+        """Handle zoom slider changes"""
+        self.zoom_label.setText(f"{value}%")
+        self.update_screenshot_display()
+    
+    def fit_screenshot_to_window(self):
+        """Fit screenshot to available window space"""
+        if self.current_screenshot_pixmap is None:
+            return
+        
+        # Get the scroll area size (the available viewing area)
+        available_width = self.screenshot_scroll_area.viewport().width() - 40  # Padding
+        available_height = self.screenshot_scroll_area.viewport().height() - 40
+        
+        # Ensure we have valid dimensions
+        if available_width <= 0 or available_height <= 0:
+            # Fallback to 100% if viewport not ready
+            self.zoom_slider.setValue(100)
+            return
+        
+        # Get original image size
+        original_width = self.current_screenshot_pixmap.width()
+        original_height = self.current_screenshot_pixmap.height()
+        
+        # Calculate zoom percentage to fit
+        width_ratio = available_width / original_width * 100
+        height_ratio = available_height / original_height * 100
+        
+        # Use the smaller ratio to ensure it fits in both dimensions
+        fit_zoom = min(width_ratio, height_ratio, 200)  # Cap at 200%
+        fit_zoom = max(fit_zoom, 10)  # Minimum 10%
+        
+        # Update zoom slider (this will trigger update_screenshot_display)
+        self.zoom_slider.setValue(int(fit_zoom))
+    
+    def update_screenshot_display(self):
+        """Update screenshot display with current zoom level"""
+        if self.current_screenshot_pixmap is None:
+            return
+        
+        zoom_percent = self.zoom_slider.value()
+        
+        # Calculate scaled size
+        original_width = self.current_screenshot_pixmap.width()
+        original_height = self.current_screenshot_pixmap.height()
+        
+        scaled_width = int(original_width * zoom_percent / 100)
+        scaled_height = int(original_height * zoom_percent / 100)
+        
+        # Scale pixmap
+        scaled_pixmap = self.current_screenshot_pixmap.scaled(
+            scaled_width,
+            scaled_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        self.screenshot_preview.setPixmap(scaled_pixmap)
+        self.screenshot_preview.resize(scaled_pixmap.size())
             
     def load_audio_files(self, session_id):
         """Load audio files for the session"""
@@ -1396,15 +1512,13 @@ class FlowBotGUI(QMainWindow):
         self.progress_bar.setRange(0, 0)  # Indeterminate
         
         use_vosk = self.vosk_checkbox.isChecked()
-        use_easyocr = self.easyocr_checkbox.isChecked()
-        transcription_method = "Vosk (offline)" if use_vosk else "Whisper (online)"
-        ocr_engine = "EasyOCR" if use_easyocr else "Tesseract"
+        transcription_method = "Vosk (offline)" if use_vosk else "No transcription"
         self.log(f"Using transcription: {transcription_method}", "INFO")
-        self.log(f"Using OCR engine: {ocr_engine}", "INFO")
+        self.log(f"Using OCR engine: Tesseract", "INFO")
         
         def analyze_task():
             self.log("Running analyzer.analyze_session()...", "INFO")
-            workflow = analyzer.analyze_session(session_dir, use_vosk=use_vosk, use_easyocr=use_easyocr)
+            workflow = analyzer.analyze_session(session_dir, use_vosk=use_vosk)
             if workflow and "session" in workflow:
                 session_id = workflow["session"]
                 self.log(f"Analysis complete for session: {session_id}", "SUCCESS")

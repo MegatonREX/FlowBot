@@ -3,14 +3,12 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('models', 'models')]
 binaries = []
-hiddenimports = ['PyQt6', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'pynput', 'pynput.mouse', 'pynput.keyboard', 'PIL', 'PIL.Image', 'PIL.ImageGrab', 'pytesseract', 'vosk', 'sounddevice', 'scipy', 'scipy.io', 'scipy.io.wavfile', 'cv2', 'numpy', 'pyautogui', 'requests', 'pygetwindow', 'easyocr', 'torch']
+hiddenimports = ['PyQt6', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'pynput', 'pynput.mouse', 'pynput.keyboard', 'PIL', 'PIL.Image', 'PIL.ImageGrab', 'pytesseract', 'vosk', 'sounddevice', 'scipy', 'scipy.io', 'scipy.io.wavfile', 'cv2', 'numpy', 'pyautogui', 'requests', 'pygetwindow']
 tmp_ret = collect_all('PyQt6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('vosk')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('sounddevice')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('easyocr')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
