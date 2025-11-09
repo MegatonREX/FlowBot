@@ -322,7 +322,7 @@ def _type_text(text, speed=1.0):
         pyautogui.typewrite(str(chunk), interval=max(0.01, 0.02 / speed))
         time.sleep(max(0.1, 0.2 / speed))
 
-def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
+def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1, is_double_click=False):
     """Move and click with smarter delay based on context."""
     try:
         screen_width, screen_height = pyautogui.size()
@@ -338,25 +338,85 @@ def _click_at_point(x, y, speed=1.0, clicks=1, interval=0.1):
         else:
             pyautogui.click(clicks=clicks, interval=interval)
 
-        base_delay = max(1.0, 1.5 / speed)
+        # Longer initial delay for double-clicks (likely opening files/apps)
+        if clicks == 2 or is_double_click:
+            base_delay = max(3.0, 4.0 / speed)  # Longer delay for app launches
+            print(f"[Automator] Double-click detected, waiting {base_delay}s for application to start...")
+        else:
+            base_delay = max(1.0, 1.5 / speed)
+        
         time.sleep(base_delay)
         
-        max_wait = 5
+        # Extended wait for screen changes (especially for app launches)
+        max_wait = 15 if (clicks == 2 or is_double_click) else 5
+        significant_change_threshold = 5.0  # Lower threshold = more sensitive
+        
         start = time.time()
+        stable_count = 0
+        last_mean_diff = 0
+        
         while time.time() - start < max_wait:
             current = screenshot_to_cv2()
             pre_gray = cv2.cvtColor(pre_click, cv2.COLOR_BGR2GRAY)
             curr_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
             diff = cv2.absdiff(pre_gray, curr_gray)
-            if cv2.mean(diff)[0] < 2.0:
-                time.sleep(0.5)
+            mean_diff = cv2.mean(diff)[0]
+            
+            # If screen changed significantly, wait a bit more for it to stabilize
+            if mean_diff > significant_change_threshold:
+                print(f"[Automator] Screen change detected (diff={mean_diff:.2f}), waiting for stabilization...")
+                stable_count = 0
+                last_mean_diff = mean_diff
+                time.sleep(1.0)
                 continue
+            
+            # Screen is stable
+            if mean_diff < 2.0:
+                stable_count += 1
+                if stable_count >= 2:  # Require 2 stable readings
+                    time.sleep(0.5)  # Small final delay
+                    break
+                time.sleep(0.5)
             else:
                 time.sleep(0.5)
                 break
             
     except Exception as e:
         print(f"Warning: Click failed at ({x}, {y}): {e}")
+
+# -------------------
+# App launch detection
+# -------------------
+def _is_likely_app_launch(step):
+    """Detect if a step is likely launching an application."""
+    # Check OCR text for common app names
+    ocr_text = (step.get("ocr_text") or "").lower()
+    app_keywords = [
+        "excel", "word", "powerpoint", "outlook", "chrome", "firefox", 
+        "edge", "notepad", "calculator", "paint", "teams", "slack",
+        "vscode", "visual studio", "photoshop", "illustrator", "zoom",
+        "discord", "spotify", "steam", "game", "browser", "file explorer"
+    ]
+    
+    if any(keyword in ocr_text for keyword in app_keywords):
+        return True
+    
+    # Check anchor filename
+    anchor = step.get("anchor", "")
+    if anchor:
+        anchor_lower = anchor.lower()
+        if any(keyword in anchor_lower for keyword in app_keywords):
+            return True
+        # Check for desktop/taskbar/start menu indicators
+        if any(loc in anchor_lower for loc in ["desktop", "taskbar", "start", "menu", "shortcut"]):
+            return True
+    
+    # Check if double-click (common for launching)
+    details = step.get("details", {})
+    if details.get("clicks") == 2:
+        return True
+    
+    return False
 
 # -------------------
 # Replay logic with post-conditions & retries
@@ -429,8 +489,20 @@ def replay(workflow, speed=1.0, anchor_threshold=0.80, default_retry=1):
                             # allow step to request multi-clicks via details e.g., {"clicks":1}
                             clicks = int(details.get("clicks", 1))
                             interval = float(details.get("click_interval", 0.08))
-                            _click_at_point(click_point[0], click_point[1], speed=speed, clicks=clicks, interval=interval)
-                            print(f"[Automator] CLICK {sid} -> {click_point} (clicks={clicks})")
+                            
+                            # Detect if likely launching an app
+                            is_app_launch = _is_likely_app_launch(s)
+                            is_double = clicks == 2 or is_app_launch
+                            
+                            _click_at_point(click_point[0], click_point[1], speed=speed, clicks=clicks, interval=interval, is_double_click=is_double)
+                            
+                            if is_app_launch:
+                                print(f"[Automator] APP LAUNCH detected in {sid} -> {click_point}")
+                                print(f"[Automator] OCR: {s.get('ocr_text', 'N/A')[:50]}")
+                            elif clicks == 2:
+                                print(f"[Automator] DOUBLE-CLICK {sid} -> {click_point} (waiting for app launch...)")
+                            else:
+                                print(f"[Automator] CLICK {sid} -> {click_point} (clicks={clicks})")
                     else:
                         print(f"[Automator] No click target for {sid}; skipping action")
                 elif act in ("key_down", "type", "type_text"):

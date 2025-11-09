@@ -171,6 +171,12 @@ class FlowBotGUI(QMainWindow):
         QPushButton#stopButton {
             background-color: #d13438;
         }
+        QPushButton#automateButton {
+            background-color: #107c10;
+        }
+        QPushButton#automateButton:hover {
+            background-color: #0e8b0e;
+        }
         QPushButton#deleteButton {
             background-color: #8b0000;
         }
@@ -366,6 +372,12 @@ class FlowBotGUI(QMainWindow):
         self.refresh_button = QPushButton("🔄 Refresh")
         self.refresh_button.clicked.connect(self.load_sessions)
         session_btn_layout.addWidget(self.refresh_button)
+        
+        self.automate_button = QPushButton("▶️ Automate")
+        self.automate_button.setObjectName("automateButton")
+        self.automate_button.clicked.connect(self.automate_workflow)
+        self.automate_button.setEnabled(False)
+        session_btn_layout.addWidget(self.automate_button)
         
         self.delete_button = QPushButton("🗑️ Delete")
         self.delete_button.setObjectName("deleteButton")
@@ -1098,6 +1110,7 @@ class FlowBotGUI(QMainWindow):
         self.analyze_button.setEnabled(True)
         self.clean_button.setEnabled(workflow_path.exists())
         self.ollama_button.setEnabled(cleaned_path.exists())
+        self.automate_button.setEnabled(workflow_path.exists())
         
     def load_session_details(self, session_id):
         """Load and display session details"""
@@ -1672,6 +1685,131 @@ class FlowBotGUI(QMainWindow):
             "Automation execution is not yet implemented.\n\n"
             "Future versions will allow you to execute the suggested automation steps."
         )
+    
+    def automate_workflow(self):
+        """Automate the selected workflow by replaying it"""
+        # Import automator module (requires opencv-python, pyautogui, imagehash)
+        try:
+            import automator
+        except ImportError as e:
+            self.log(f"Failed to import automator module: {e}", "ERROR")
+            QMessageBox.critical(
+                self,
+                "Missing Dependencies",
+                "Automation requires additional packages:\n\n"
+                "• opencv-python (cv2)\n"
+                "• pyautogui\n"
+                "• imagehash\n"
+                "• pytesseract (optional)\n"
+                "• psutil (optional)\n"
+                "• pygetwindow (optional)\n\n"
+                "Install with:\n"
+                "pip install opencv-python pyautogui imagehash pytesseract psutil pygetwindow"
+            )
+            return
+        
+        current_item = self.session_list.currentItem()
+        if not current_item:
+            return
+            
+        session_id = current_item.data(Qt.ItemDataRole.UserRole)
+        workflow_path = Path("workflows") / f"workflow_{session_id}.json"
+        
+        if not workflow_path.exists():
+            self.log(f"Workflow not found for session: {session_id}", "WARNING")
+            QMessageBox.warning(self, "Automation", "Workflow not found. Analyze the workflow first.")
+            return
+        
+        # Load workflow
+        try:
+            workflow = automator.load_workflow(str(workflow_path))
+        except Exception as e:
+            self.log(f"Failed to load workflow: {e}", "ERROR")
+            QMessageBox.critical(self, "Automation Error", f"Failed to load workflow:\n{str(e)}")
+            return
+        
+        # Show dry run first
+        self.log("=" * 80, "INFO")
+        self.log("WORKFLOW AUTOMATION - DRY RUN", "INFO")
+        self.log("=" * 80, "INFO")
+        
+        # Capture dry run output
+        from io import StringIO
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = captured_output = StringIO()
+        
+        try:
+            automator.dry_run(workflow)
+            dry_run_text = captured_output.getvalue()
+        finally:
+            sys.stdout = old_stdout
+        
+        # Display dry run in console
+        self.log(dry_run_text, "INFO")
+        self.log("=" * 80, "INFO")
+        
+        # Ask for confirmation
+        reply = QMessageBox.question(
+            self,
+            "Confirm Automation",
+            f"Ready to automate workflow: {session_id}\n\n"
+            f"Steps: {len(workflow.get('steps', []))}\n\n"
+            "The automation will start in 5 seconds after you click YES.\n"
+            "Move your mouse to the top-left corner to abort.\n\n"
+            "Do you want to proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            self.log("Automation cancelled by user", "INFO")
+            return
+        
+        # Run automation in background thread
+        self.log("Starting workflow automation...", "INFO")
+        self.status_bar.showMessage("Running automation...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        
+        # Disable recording buttons during automation
+        self.record_button.setEnabled(False)
+        self.automate_button.setEnabled(False)
+        
+        def automation_task():
+            automator.replay(workflow, speed=1.0, anchor_threshold=0.80)
+            return "Automation completed successfully"
+            
+        self.worker_thread = WorkerThread(automation_task)
+        self.worker_thread.log_message.connect(lambda msg: self.log(msg, "AUTOMATOR"))
+        self.worker_thread.finished.connect(self.on_automation_complete)
+        self.worker_thread.start()
+    
+    def on_automation_complete(self, success, message):
+        """Handle automation completion"""
+        self.progress_bar.setVisible(False)
+        self.record_button.setEnabled(not self.recording)
+        self.automate_button.setEnabled(True)
+        
+        if success:
+            self.log("=" * 80, "SUCCESS")
+            self.log("AUTOMATION COMPLETED SUCCESSFULLY!", "SUCCESS")
+            self.log("=" * 80, "SUCCESS")
+            self.status_bar.showMessage("Automation complete!")
+            QMessageBox.information(
+                self,
+                "Automation Complete",
+                "Workflow automation completed successfully!"
+            )
+        else:
+            self.log(f"Automation failed: {message}", "ERROR")
+            self.status_bar.showMessage("Automation failed")
+            QMessageBox.warning(
+                self,
+                "Automation Error",
+                f"Automation failed:\n{message}\n\n"
+                "Check the console for details."
+            )
 
 
 def main():

@@ -11,7 +11,7 @@ Built for the Hackathon: "The AGI Assistant" - implements Observe → Understand
 - **🧹 Smart Cleaning**: Removes noise and formats for LLM consumption
 - **📊 Workflow Visualization**: Modern PyQt6 GUI to view and manage recordings
 - **🎤 Audio Transcription**: Offline transcription with Vosk or online with Whisper
-- **⚡ Automation (Coming Soon)**: Execute workflows automatically
+- **▶️ Workflow Automation**: Replay workflows with intelligent anchor-based clicking
 - **🗑️ File Management**: Delete sessions and clean up storage
 
 ## 📁 Project Structure
@@ -119,10 +119,15 @@ The FlowBot GUI provides a modern, dark-themed interface with:
    - See what was said during recording
    - Correlate speech with actions
 
-4. **⚡ Automation Tab** (Coming Soon)
-   - Extract automation steps
-   - Execute automated workflows
-   - Monitor execution progress
+4. **📸 Screenshots Tab**
+   - View captured screenshots
+   - Zoom and pan functionality
+   - See visual workflow context
+
+5. **🎵 Audio Tab**
+   - Listen to recorded audio
+   - Play back conversations
+   - Review voice commands
 
 ### Session Status Icons
 
@@ -160,9 +165,26 @@ The AI analysis provides:
 - **Automation**: Suggestions for automating repetitive tasks
 - **Steps**: Detailed automation steps
 
+### Automating Workflows
+
+1. Select a recorded and analyzed session
+2. Click **"▶️ Automate"** button (green button in session controls)
+3. Review the dry run output in the console
+4. Click **"YES"** to confirm automation
+5. Automation starts in 5 seconds (move mouse to corner to abort)
+6. Watch the workflow replay automatically!
+
+**Automation Requirements:**
+```bash
+pip install opencv-python pyautogui imagehash
+```
+
+See [AUTOMATION_FEATURE.md](AUTOMATION_FEATURE.md) for detailed documentation.
+
 ### Managing Sessions
 
 - **Refresh**: Update session list
+- **▶️ Automate**: Replay workflow automatically
 - **Delete**: Remove session and all related files
   - Deletes: recordings, workflows, analyses, transcripts
 
